@@ -54,6 +54,12 @@ class NNEngine:
                 return
         if self.model:
             self.model.to(self.device)
+            if self.device.startswith("cuda"):
+                try:
+                    self.model.half()
+                    logger.info("Using FP16 on CUDA for faster inference")
+                except Exception as exc:
+                    logger.warning("Failed to switch model to FP16: %s", exc)
             self.model.eval()
             logger.info("NNEngine initialized (device=%s)", self.device)
 
@@ -76,10 +82,11 @@ class NNEngine:
         if logits is None:
             raise RuntimeError("Model output not understood")
 
-        probs = F.softmax(logits, dim=1)
-        conf_map, class_map = torch.max(probs, dim=1)  # shapes (1, H, W)
+        # Faster than softmax for argmax classification: use logits directly.
+        class_map = torch.argmax(logits, dim=1)  # (1, H, W)
+        conf_map = torch.max(logits, dim=1).values  # raw scores as confidence proxy
 
-        conf_np = conf_map.squeeze(0).cpu().numpy()
+        conf_np = conf_map.squeeze(0).float().cpu().numpy()
         class_np = class_map.squeeze(0).cpu().numpy().astype(np.uint8)
 
         if (logits.shape[2], logits.shape[3]) != (orig_h, orig_w):

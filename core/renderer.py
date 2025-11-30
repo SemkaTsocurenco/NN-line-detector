@@ -21,10 +21,10 @@ class Renderer:
                 mask = det.mask
                 if mask.ndim == 2:
                     mask = np.expand_dims(mask, axis=-1)
-                colored = np.zeros_like(img)
-                colored[:, :] = color
-                alpha_mask = (mask.astype(np.float32) / 255.0) * 0.3
-                img = (img * (1 - alpha_mask) + colored * alpha_mask).astype(np.uint8)
+                alpha = 0.25
+                mask_f = (mask.astype(np.float32) / 255.0) * alpha
+                img = cv2.addWeighted(img, 1.0, np.full_like(img, color), 0.0, 0, dst=img)
+                img = (img * (1 - mask_f) + np.array(color, dtype=np.float32) * mask_f).astype(np.uint8)
             if det.bbox is not None:
                 x1, y1, x2, y2 = det.bbox
                 cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)

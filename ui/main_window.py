@@ -11,6 +11,8 @@ from core.nn_engine import NNEngine
 from core.postprocess import DetectionPostprocessor, GeometryMapper, PostprocessParams
 from core.renderer import Renderer
 from core.video_capture import GST_AVAILABLE, VideoCaptureService
+from network.protocol import ProtocolBuilder, SeqCounter, TimeProvider
+from network.tcp_client import TcpClient
 from ui.video_widget import VideoWidget
 from utils.config_manager import ConfigManager
 
@@ -54,6 +56,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._video_service: Optional[VideoCaptureService] = None
         self._inference_worker: Optional[InferenceWorker] = None
         self._nn_engine: Optional[NNEngine] = None
+        self._tcp_client: Optional[TcpClient] = None
+        self._protocol_builder: Optional[ProtocolBuilder] = None
 
         self._build_layout()
         self._connect_signals()
@@ -118,7 +122,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_services(self) -> None:
         self._teardown_inference()
+        self._teardown_tcp()
+
         self._start_inference()
+        self._start_tcp()
 
         if self._video_service:
             self._video_service.stop()
@@ -162,15 +169,35 @@ class MainWindow(QtWidgets.QMainWindow):
             renderer=renderer,
         )
         self._inference_worker.frame_ready.connect(self._on_inference_frame)
-        self._inference_worker.detections_updated.connect(self._on_detections_updated)
+        self._inference_worker.detection_data.connect(self._on_detection_data)
         self._inference_worker.error.connect(self._on_inference_error)
         self._inference_worker.start()
         self.nn_status.setText("NN: running")
+
+        self._protocol_builder = ProtocolBuilder(seq_counter=SeqCounter(), time_provider=TimeProvider())
+
+    def _start_tcp(self) -> None:
+        host = self.config_manager.get_value("tcp.host", "127.0.0.1")
+        port = int(self.config_manager.get_value("tcp.port", 9000))
+        reconnect_delay_s = float(self.config_manager.get_value("tcp.reconnect_delay_s", 2.0))
+        drop_if_disconnected = bool(self.config_manager.get_value("tcp.drop_if_disconnected", True))
+
+        self._tcp_client = TcpClient(
+            host=host,
+            port=port,
+            reconnect_delay_s=reconnect_delay_s,
+            drop_if_disconnected=drop_if_disconnected,
+        )
+        self._tcp_client.status_changed.connect(self._on_tcp_status)
+        self._tcp_client.error.connect(self._on_tcp_error)
+        self._tcp_client.start()
+        self.tcp_status.setText(f"TCP: connecting {host}:{port}")
 
     def _on_stop_clicked(self) -> None:
         if self._video_service:
             self._video_service.stop()
         self._teardown_inference()
+        self._teardown_tcp()
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.rtsp_status.setText("RTSP: stopped")
@@ -220,8 +247,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_inference_frame(self, image: QtGui.QImage) -> None:
         self.video_widget.set_image(image)
 
-    def _on_detections_updated(self, summary: object, count: int) -> None:
-        self.detections_label.setText(f"Detections: {count}")
+    def _on_detection_data(self, summary: object, objects: list) -> None:
+        self.detections_label.setText(f"Detections: {len(objects)}")
+        if not self._protocol_builder or not self._tcp_client:
+            return
+        try:
+            lane_frame = self._protocol_builder.build_lane_summary_frame(summary)
+            objects_frame = self._protocol_builder.build_marking_objects_frame(objects)
+            self._tcp_client.send(lane_frame)
+            self._tcp_client.send(objects_frame)
+        except Exception as exc:
+            logger.error("Failed to build/send protocol frames: %s", exc)
 
     def _on_inference_error(self, msg: str) -> None:
         logger.error("Inference error: %s", msg)
@@ -242,6 +278,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self._inference_worker = None
         self.nn_status.setText("NN: idle")
         self.detections_label.setText("Detections: 0")
+
+    def _teardown_tcp(self) -> None:
+        if self._tcp_client:
+            self._tcp_client.stop()
+            self._tcp_client = None
+        self.tcp_status.setText("TCP: idle")
+
+    def _on_tcp_status(self, status: str) -> None:
+        self.tcp_status.setText(f"TCP: {status}")
+
+    def _on_tcp_error(self, msg: str) -> None:
+        logger.error("TCP error: %s", msg)
+        self.tcp_status.setText(f"TCP error: {msg}")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         if self._video_service:

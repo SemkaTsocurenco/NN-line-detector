@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class InferenceWorker(QtCore.QObject):
     frame_ready = QtCore.pyqtSignal(QtGui.QImage)
-    detections_updated = QtCore.pyqtSignal(object, int)  # LaneSummary, count of objects
+    detection_data = QtCore.pyqtSignal(object, list)  # LaneSummary, list[MarkingObject]
     error = QtCore.pyqtSignal(str)
 
     def __init__(
@@ -91,7 +91,7 @@ class InferenceWorker(QtCore.QObject):
                 rendered = self.renderer.render(frame, processed, summary)
                 qimage = self._to_qimage(rendered)
                 self.frame_ready.emit(qimage)
-                self.detections_updated.emit(summary, len(objects))
+                self.detection_data.emit(summary, objects)
             except Exception as exc:  # pragma: no cover - runtime safety
                 logger.exception("Inference error: %s", exc)
                 self.error.emit(str(exc))
