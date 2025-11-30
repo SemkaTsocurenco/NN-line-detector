@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Iterable, List
 
-from core.detections import LaneSummary, MarkingObject
+from core.detections import LaneBoundaryPoint, LaneSummary, MarkingObject
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +15,8 @@ VERSION = 0x01
 MSG_TYPE_LANE_SUMMARY = 0x01
 MSG_TYPE_MARKING_OBJECTS = 0x02
 MAX_PAYLOAD_SIZE = 1024  # per spec: payload length constraint
+MSG_TYPE_LANE_DETAILS = 0x03
+MSG_TYPE_MARKING_OBJECTS_EX = 0x04
 
 
 def crc16_ibm(data: bytes) -> int:
@@ -94,6 +96,60 @@ class ProtocolBuilder:
         payload = b"".join(payload_parts)
         return self._build_frame(MSG_TYPE_MARKING_OBJECTS, payload)
 
+    def build_lane_details_frame(self, summary: LaneSummary) -> bytes:
+        def pad_points(points: List[LaneBoundaryPoint], count: int = 3) -> List[LaneBoundaryPoint]:
+            pts = list(points)[:count]
+            while len(pts) < count:
+                pts.append(LaneBoundaryPoint(0, 0))
+            return pts
+
+        left_pts = pad_points(summary.left_boundary)
+        right_pts = pad_points(summary.right_boundary)
+        payload_parts = [
+            struct.pack(
+                "<BBBBBBHH",
+                summary.left_type & 0xFF,
+                summary.right_type & 0xFF,
+                summary.left_color & 0xFF,
+                summary.right_color & 0xFF,
+                summary.left_quality & 0xFF,
+                summary.right_quality & 0xFF,
+                summary.left_width_dm & 0xFFFF,
+                summary.right_width_dm & 0xFFFF,
+            )
+        ]
+        for pt in left_pts + right_pts:
+            payload_parts.append(struct.pack("<hh", pt.x_dm, pt.y_dm))
+        payload = b"".join(payload_parts)
+        return self._build_frame(MSG_TYPE_LANE_DETAILS, payload)
+
+    def build_marking_objects_ex_frame(self, objects: Iterable[MarkingObject]) -> bytes:
+        objs_list: List[MarkingObject] = list(objects)
+        max_objects = (MAX_PAYLOAD_SIZE - 1) // 15  # 1 byte for count, 15 per obj
+        if len(objs_list) > max_objects:
+            logger.warning("Trimming objects from %d to %d to satisfy extended frame size", len(objs_list), max_objects)
+            objs_list = objs_list[:max_objects]
+        count = len(objs_list)
+        payload_parts = [struct.pack("<B", count)]
+        for obj in objs_list:
+            payload_parts.append(
+                struct.pack(
+                    "<BhhHHhBBBB",
+                    obj.class_id & 0xFF,
+                    obj.x_dm,
+                    obj.y_dm,
+                    obj.length_dm & 0xFFFF,
+                    obj.width_dm & 0xFFFF,
+                    obj.yaw_decideg,
+                    obj.confidence_byte & 0xFF,
+                    obj.flags & 0xFF,
+                    obj.line_color & 0xFF,
+                    obj.line_style & 0xFF,
+                )
+            )
+        payload = b"".join(payload_parts)
+        return self._build_frame(MSG_TYPE_MARKING_OBJECTS_EX, payload)
+
     def _build_frame(self, msg_type: int, payload: bytes) -> bytes:
         seq = self.seq_counter.next()
         timestamp_ms = self.time_provider()
@@ -114,5 +170,9 @@ if __name__ == "__main__":  # simple manual self-check
     ]
     lane_frame = builder.build_lane_summary_frame(ls)
     obj_frame = builder.build_marking_objects_frame(mo)
+    lane_details = builder.build_lane_details_frame(ls)
+    obj_frame_ex = builder.build_marking_objects_ex_frame(mo)
     print(f"LaneSummary frame length={len(lane_frame)} (expected 1+9+8+2=20)")
-    print(f"MarkingObjects frame length={len(obj_frame)} (expected 1+9+1+2*13+2=39)")
+    print(f"LaneDetails frame length={len(lane_details)} (expected 1+9+46+2=58)")
+    print(f"MarkingObjects frame length={len(obj_frame)} (expected 1+9+1+N*13+2)")
+    print(f"MarkingObjectsEx frame length={len(obj_frame_ex)} (expected 1+9+1+N*15+2)")

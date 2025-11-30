@@ -38,9 +38,18 @@ nn:
     '23': bike_icon
     '24': parking_lot
 postprocess:
-  confidence_threshold: 0.5
+  confidence_threshold: 0.6
   min_area: 170.0
   merge_iou_threshold: 0.5
+line_fitting:
+  enabled: true
+  split_by_center: true
+  poly_degree: 2
+  ransac_iterations: 100
+  inlier_threshold: 5.0
+  min_inlier_ratio: 0.3
+  min_points: 20
+  split_margin: 20
 tcp:
   host: 127.0.0.1
   port: 9000

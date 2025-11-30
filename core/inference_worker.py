@@ -91,10 +91,11 @@ class InferenceWorker(QtCore.QObject):
             try:
                 raw = self.nn_engine.infer(frame)
                 processed = self.postprocessor.process(raw, frame.shape)
+                fitted_lines = self.postprocessor.fit_lines(processed)
                 summary = self.postprocessor.build_lane_summary(processed, frame.shape)
                 objects = self.geometry_mapper.to_marking_objects(processed, frame.shape)
                 if self.render_output:
-                    rendered = self.renderer.render(frame, processed, summary)
+                    rendered = self.renderer.render(frame, processed, summary, fitted_lines)
                     qimage = self._to_qimage(rendered)
                     self.frame_ready.emit(qimage)
                 self.detection_data.emit(summary, objects)

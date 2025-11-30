@@ -11,7 +11,13 @@ from core.nn_engine import NNEngine
 from core.postprocess import DetectionPostprocessor, GeometryMapper, PostprocessParams
 from core.renderer import Renderer
 from core.video_capture import GST_AVAILABLE, VideoCaptureService
-from network.protocol import ProtocolBuilder, SeqCounter, TimeProvider
+from network.protocol import (
+    ProtocolBuilder,
+    SeqCounter,
+    TimeProvider,
+    MSG_TYPE_LANE_DETAILS,
+    MSG_TYPE_MARKING_OBJECTS_EX,
+)
 from network.tcp_client import TcpClient
 from ui.video_widget import VideoWidget
 from utils.config_manager import ConfigManager
@@ -165,8 +171,9 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError("Model not loaded")
 
         params = self._current_postprocess_params()
-        postprocessor = DetectionPostprocessor(params)
         geometry = GeometryMapper(self.config_manager.get_value("camera.calibration", {}))
+        line_fitting_params = self.config_manager.get_value("line_fitting", {})
+        postprocessor = DetectionPostprocessor(params, geometry_mapper=geometry, line_fitting_params=line_fitting_params)
         renderer = Renderer(class_names)
 
         self._inference_worker = InferenceWorker(
@@ -270,8 +277,12 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             lane_frame = self._protocol_builder.build_lane_summary_frame(summary)
             objects_frame = self._protocol_builder.build_marking_objects_frame(objects)
+            lane_details = self._protocol_builder.build_lane_details_frame(summary)
+            objects_ex = self._protocol_builder.build_marking_objects_ex_frame(objects)
             self._tcp_client.send(lane_frame)
             self._tcp_client.send(objects_frame)
+            self._tcp_client.send(lane_details)
+            self._tcp_client.send(objects_ex)
         except Exception as exc:
             logger.error("Failed to build/send protocol frames: %s", exc)
 

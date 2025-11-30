@@ -23,6 +23,13 @@ class LaneType(IntEnum):
     BOTTS = 4
 
 
+class LineColor(IntEnum):
+    UNKNOWN = 0
+    WHITE = 1
+    YELLOW = 2
+    RED = 3
+
+
 @dataclass
 class DetectionRaw:
     class_id: int
@@ -42,6 +49,8 @@ class MarkingObject:
     yaw_decideg: int
     confidence_byte: int
     flags: int = 0
+    line_color: LineColor = LineColor.UNKNOWN
+    line_style: LaneType = LaneType.UNKNOWN
 
 
 @dataclass
@@ -50,8 +59,22 @@ class LaneSummary:
     right_offset_dm: int = 0
     left_type: LaneType = LaneType.UNKNOWN
     right_type: LaneType = LaneType.UNKNOWN
+    left_color: LineColor = LineColor.UNKNOWN
+    right_color: LineColor = LineColor.UNKNOWN
     allowed_maneuvers: ManeuverFlags = ManeuverFlags.NONE
     quality: int = 0  # 0..255
+    left_quality: int = 0
+    right_quality: int = 0
+    left_width_dm: int = 0
+    right_width_dm: int = 0
+    left_boundary: List["LaneBoundaryPoint"] = field(default_factory=list)
+    right_boundary: List["LaneBoundaryPoint"] = field(default_factory=list)
+
+
+@dataclass
+class LaneBoundaryPoint:
+    x_dm: int
+    y_dm: int
 
 
 @dataclass
@@ -59,3 +82,4 @@ class FrameDetections:
     raw: List[DetectionRaw] = field(default_factory=list)
     objects: List[MarkingObject] = field(default_factory=list)
     summary: LaneSummary = field(default_factory=LaneSummary)
+    fitted_lines: List = field(default_factory=list)  # List[FittedLine] from line_fitting
