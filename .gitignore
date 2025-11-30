@@ -22,3 +22,9 @@ dist/
 
 # Binary artifacts
 *.so
+
+# NN weights (do not commit large model files)
+NN/*.pth
+NN/*.pt
+NN/*.onnx
+NN/*.bin
