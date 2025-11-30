@@ -1,0 +1,58 @@
+rtsp:
+  uri: rtsp://239.0.0.1:5000
+  latency_ms: 100
+  drop_old_frames: true
+  gst_pipeline: ''
+nn:
+  model_path: NN/model_traced.pt
+  device: cpu
+  input_size:
+  - 512
+  - 512
+  num_classes: 25
+  class_names:
+    '0': background
+    '1': box_junction
+    '2': crosswalk
+    '3': stop_line
+    '4': solid_single_white
+    '5': solid_single_yellow
+    '6': solid_single_red
+    '7': solid_double_white
+    '8': solid_double_yellow
+    '9': dashed_single_white
+    '10': dashed_single_yellow
+    '11': left_arrow
+    '12': straight_arrow
+    '13': right_arrow
+    '14': left_straight_arrow
+    '15': right_straight_arrow
+    '16': channelizing_line
+    '17': motor_prohibited
+    '18': slow
+    '19': motor_priority_lane
+    '20': motor_waiting_zone
+    '21': left_turn_box
+    '22': motor_icon
+    '23': bike_icon
+    '24': parking_lot
+postprocess:
+  confidence_threshold: 0.5
+  min_area: 100.0
+  merge_iou_threshold: 0.5
+tcp:
+  host: 127.0.0.1
+  port: 9000
+  reconnect_delay_s: 2.0
+  drop_if_disconnected: true
+camera:
+  calibration:
+    fx: 1.0
+    fy: 1.0
+    cx: 0.0
+    cy: 0.0
+    height_m: 1.0
+    pitch_deg: 0.0
+logging:
+  level: INFO
+  log_file: ''
