@@ -25,12 +25,14 @@ class InferenceWorker(QtCore.QObject):
         postprocessor: DetectionPostprocessor,
         geometry_mapper: GeometryMapper,
         renderer: Renderer,
+        render_output: bool = True,
     ) -> None:
         super().__init__()
         self.nn_engine = nn_engine
         self.postprocessor = postprocessor
         self.geometry_mapper = geometry_mapper
         self.renderer = renderer
+        self.render_output = render_output
 
         self._frame_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=1)
         self._thread: Optional[QtCore.QThread] = None
@@ -75,6 +77,9 @@ class InferenceWorker(QtCore.QObject):
     def update_postprocess_params(self, params: PostprocessParams) -> None:
         self.postprocessor.update_params(params)
 
+    def set_render_output(self, enabled: bool) -> None:
+        self.render_output = enabled
+
     def _run(self) -> None:
         while self._running:
             try:
@@ -88,9 +93,10 @@ class InferenceWorker(QtCore.QObject):
                 processed = self.postprocessor.process(raw, frame.shape)
                 summary = self.postprocessor.build_lane_summary(processed, frame.shape)
                 objects = self.geometry_mapper.to_marking_objects(processed, frame.shape)
-                rendered = self.renderer.render(frame, processed, summary)
-                qimage = self._to_qimage(rendered)
-                self.frame_ready.emit(qimage)
+                if self.render_output:
+                    rendered = self.renderer.render(frame, processed, summary)
+                    qimage = self._to_qimage(rendered)
+                    self.frame_ready.emit(qimage)
                 self.detection_data.emit(summary, objects)
             except Exception as exc:  # pragma: no cover - runtime safety
                 logger.exception("Inference error: %s", exc)

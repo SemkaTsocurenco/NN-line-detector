@@ -3,6 +3,7 @@ rtsp:
   latency_ms: 100
   drop_old_frames: true
   gst_pipeline: ''
+  enabled: true
 nn:
   model_path: NN/model_traced.pt
   device: cpu
@@ -47,8 +48,8 @@ tcp:
   drop_if_disconnected: true
 camera:
   calibration:
-    fx: 1.0
-    fy: 1.0
+    fx: 12.0
+    fy: 12.0
     cx: 0.0
     cy: 0.0
     height_m: 1.0
@@ -56,3 +57,5 @@ camera:
 logging:
   level: INFO
   log_file: ''
+render:
+  enabled: true

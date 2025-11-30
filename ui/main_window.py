@@ -52,6 +52,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nn_status = QtWidgets.QLabel("NN: idle")
         self.tcp_status = QtWidgets.QLabel("TCP: idle")
         self.detections_label = QtWidgets.QLabel("Detections: 0")
+        self.video_enabled_checkbox = QtWidgets.QCheckBox("Render video")
+        self.video_enabled_checkbox.setChecked(bool(self.config_manager.get_value("render.enabled", True)))
 
         self._video_service: Optional[VideoCaptureService] = None
         self._inference_worker: Optional[InferenceWorker] = None
@@ -72,6 +74,7 @@ class MainWindow(QtWidgets.QMainWindow):
         control_layout.addRow("Min area:", self.area_spin)
         control_layout.addRow("TCP host:", self.tcp_host_edit)
         control_layout.addRow("TCP port:", self.tcp_port_spin)
+        control_layout.addRow(self.video_enabled_checkbox)
 
         buttons_layout = QtWidgets.QHBoxLayout()
         buttons_layout.addWidget(self.start_button)
@@ -107,6 +110,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rtsp_edit.editingFinished.connect(self._on_rtsp_changed)
         self.tcp_host_edit.editingFinished.connect(self._on_tcp_changed)
         self.tcp_port_spin.valueChanged.connect(self._on_tcp_changed)
+        self.video_enabled_checkbox.stateChanged.connect(self._on_video_toggle)
 
     def _on_start_clicked(self) -> None:
         try:
@@ -124,7 +128,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._teardown_inference()
         self._teardown_tcp()
 
-        self._start_inference()
+        render_enabled = self.video_enabled_checkbox.isChecked()
+
+        self._start_inference(render_enabled=render_enabled)
         self._start_tcp()
 
         if self._video_service:
@@ -139,11 +145,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._video_service.state_changed.connect(self._on_rtsp_state)
         self._video_service.error.connect(self._on_rtsp_error)
         self._video_service.start()
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
         self.rtsp_status.setText("RTSP: connecting")
 
-    def _start_inference(self) -> None:
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+
+    def _start_inference(self, render_enabled: bool = True) -> None:
         model_path = self.config_manager.get_value("nn.model_path", "NN/model_traced.pt")
         device = self.config_manager.get_value("nn.device", "cpu")
         input_size_cfg = self.config_manager.get_value("nn.input_size", None)
@@ -167,6 +174,7 @@ class MainWindow(QtWidgets.QMainWindow):
             postprocessor=postprocessor,
             geometry_mapper=geometry,
             renderer=renderer,
+            render_output=render_enabled,
         )
         self._inference_worker.frame_ready.connect(self._on_inference_frame)
         self._inference_worker.detection_data.connect(self._on_detection_data)
@@ -233,6 +241,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config_manager.set_value("tcp.port", int(self.tcp_port_spin.value()))
         self.config_manager.save()
 
+    def _on_video_toggle(self) -> None:
+        enabled = self.video_enabled_checkbox.isChecked()
+        self.config_manager.set_value("render.enabled", enabled)
+        self.config_manager.save()
+        if self._inference_worker:
+            self._inference_worker.set_render_output(enabled)
     def _on_frame(self, frame: np.ndarray) -> None:
         if self._inference_worker:
             self._inference_worker.submit_frame(frame)
@@ -242,10 +256,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _display_raw_frame(self, frame: np.ndarray) -> None:
         h, w, _ = frame.shape
         image = QtGui.QImage(frame.data, w, h, 3 * w, QtGui.QImage.Format_RGB888)
-        self.video_widget.set_image(image.copy())
+        if self.video_enabled_checkbox.isChecked():
+            self.video_widget.set_image(image.copy())
 
     def _on_inference_frame(self, image: QtGui.QImage) -> None:
-        self.video_widget.set_image(image)
+        if self.video_enabled_checkbox.isChecked():
+            self.video_widget.set_image(image)
 
     def _on_detection_data(self, summary: object, objects: list) -> None:
         self.detections_label.setText(f"Detections: {len(objects)}")
