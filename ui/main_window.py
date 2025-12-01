@@ -60,6 +60,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.detections_label = QtWidgets.QLabel("Detections: 0")
         self.video_enabled_checkbox = QtWidgets.QCheckBox("Render video")
         self.video_enabled_checkbox.setChecked(bool(self.config_manager.get_value("render.enabled", True)))
+        self.show_masks_checkbox = QtWidgets.QCheckBox("Show NN masks")
+        self.show_masks_checkbox.setChecked(bool(self.config_manager.get_value("render.show_masks", False)))
 
         self._video_service: Optional[VideoCaptureService] = None
         self._inference_worker: Optional[InferenceWorker] = None
@@ -81,6 +83,7 @@ class MainWindow(QtWidgets.QMainWindow):
         control_layout.addRow("TCP host:", self.tcp_host_edit)
         control_layout.addRow("TCP port:", self.tcp_port_spin)
         control_layout.addRow(self.video_enabled_checkbox)
+        control_layout.addRow(self.show_masks_checkbox)
 
         buttons_layout = QtWidgets.QHBoxLayout()
         buttons_layout.addWidget(self.start_button)
@@ -117,6 +120,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tcp_host_edit.editingFinished.connect(self._on_tcp_changed)
         self.tcp_port_spin.valueChanged.connect(self._on_tcp_changed)
         self.video_enabled_checkbox.stateChanged.connect(self._on_video_toggle)
+        self.show_masks_checkbox.stateChanged.connect(self._on_masks_toggle)
 
     def _on_start_clicked(self) -> None:
         try:
@@ -176,12 +180,14 @@ class MainWindow(QtWidgets.QMainWindow):
         postprocessor = DetectionPostprocessor(params, geometry_mapper=geometry, line_fitting_params=line_fitting_params)
         renderer = Renderer(class_names)
 
+        show_masks = bool(self.config_manager.get_value("render.show_masks", False))
         self._inference_worker = InferenceWorker(
             nn_engine=self._nn_engine,
             postprocessor=postprocessor,
             geometry_mapper=geometry,
             renderer=renderer,
             render_output=render_enabled,
+            show_masks=show_masks,
         )
         self._inference_worker.frame_ready.connect(self._on_inference_frame)
         self._inference_worker.detection_data.connect(self._on_detection_data)
@@ -254,6 +260,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config_manager.save()
         if self._inference_worker:
             self._inference_worker.set_render_output(enabled)
+
+    def _on_masks_toggle(self) -> None:
+        """Handle mask visibility toggle."""
+        enabled = self.show_masks_checkbox.isChecked()
+        self.config_manager.set_value("render.show_masks", enabled)
+        self.config_manager.save()
+        if self._inference_worker:
+            self._inference_worker.set_show_masks(enabled)
+
     def _on_frame(self, frame: np.ndarray) -> None:
         if self._inference_worker:
             self._inference_worker.submit_frame(frame)
@@ -270,7 +285,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.video_enabled_checkbox.isChecked():
             self.video_widget.set_image(image)
 
-    def _on_detection_data(self, summary: object, objects: list) -> None:
+    def _on_detection_data(self, summary: object, objects: list, fitted_lines: list) -> None:
         self.detections_label.setText(f"Detections: {len(objects)}")
         if not self._protocol_builder or not self._tcp_client:
             return
@@ -279,10 +294,12 @@ class MainWindow(QtWidgets.QMainWindow):
             objects_frame = self._protocol_builder.build_marking_objects_frame(objects)
             lane_details = self._protocol_builder.build_lane_details_frame(summary)
             objects_ex = self._protocol_builder.build_marking_objects_ex_frame(objects)
+            fitted_lines_frame = self._protocol_builder.build_fitted_lines_frame(fitted_lines)
             self._tcp_client.send(lane_frame)
             self._tcp_client.send(objects_frame)
             self._tcp_client.send(lane_details)
             self._tcp_client.send(objects_ex)
+            self._tcp_client.send(fitted_lines_frame)
         except Exception as exc:
             logger.error("Failed to build/send protocol frames: %s", exc)
 

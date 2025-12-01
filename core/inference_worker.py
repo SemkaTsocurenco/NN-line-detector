@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class InferenceWorker(QtCore.QObject):
     frame_ready = QtCore.pyqtSignal(QtGui.QImage)
-    detection_data = QtCore.pyqtSignal(object, list)  # LaneSummary, list[MarkingObject]
+    detection_data = QtCore.pyqtSignal(object, list, list)  # LaneSummary, list[MarkingObject], list[FittedLine]
     error = QtCore.pyqtSignal(str)
 
     def __init__(
@@ -26,6 +26,7 @@ class InferenceWorker(QtCore.QObject):
         geometry_mapper: GeometryMapper,
         renderer: Renderer,
         render_output: bool = True,
+        show_masks: bool = False,
     ) -> None:
         super().__init__()
         self.nn_engine = nn_engine
@@ -33,6 +34,7 @@ class InferenceWorker(QtCore.QObject):
         self.geometry_mapper = geometry_mapper
         self.renderer = renderer
         self.render_output = render_output
+        self.show_masks = show_masks
 
         self._frame_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=1)
         self._thread: Optional[QtCore.QThread] = None
@@ -80,6 +82,10 @@ class InferenceWorker(QtCore.QObject):
     def set_render_output(self, enabled: bool) -> None:
         self.render_output = enabled
 
+    def set_show_masks(self, enabled: bool) -> None:
+        """Enable or disable showing neural network masks."""
+        self.show_masks = enabled
+
     def _run(self) -> None:
         while self._running:
             try:
@@ -95,10 +101,10 @@ class InferenceWorker(QtCore.QObject):
                 summary = self.postprocessor.build_lane_summary(processed, frame.shape)
                 objects = self.geometry_mapper.to_marking_objects(processed, frame.shape)
                 if self.render_output:
-                    rendered = self.renderer.render(frame, processed, summary, fitted_lines)
+                    rendered = self.renderer.render(frame, processed, summary, fitted_lines, self.show_masks)
                     qimage = self._to_qimage(rendered)
                     self.frame_ready.emit(qimage)
-                self.detection_data.emit(summary, objects)
+                self.detection_data.emit(summary, objects, fitted_lines)
             except Exception as exc:  # pragma: no cover - runtime safety
                 logger.exception("Inference error: %s", exc)
                 self.error.emit(str(exc))

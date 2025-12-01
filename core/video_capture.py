@@ -178,7 +178,26 @@ class VideoCaptureService(QtCore.QObject):
             return Gst.FlowReturn.ERROR
 
         try:
-            frame = np.frombuffer(map_info.data, dtype=np.uint8).reshape((height, width, 3))
+            # Calculate expected size with potential stride/padding
+            data_size = len(map_info.data)
+            expected_size = height * width * 3
+
+            if data_size == expected_size:
+                # No padding, direct reshape
+                frame = np.frombuffer(map_info.data, dtype=np.uint8).reshape((height, width, 3))
+            else:
+                # There's padding in the rows, need to handle stride
+                # Calculate stride (bytes per row including padding)
+                stride = data_size // height
+                if stride * height != data_size:
+                    logger.warning(f"Unexpected buffer size: {data_size}, expected: {expected_size}")
+                    return Gst.FlowReturn.ERROR
+
+                # Reshape with stride, then extract actual image data
+                frame = np.frombuffer(map_info.data, dtype=np.uint8).reshape((height, stride))
+                # Extract only the valid pixels (width * 3 bytes per row)
+                frame = frame[:, :width * 3].reshape((height, width, 3))
+
             frame_copy = frame.copy()  # detach from Gst buffer
         finally:
             buf.unmap(map_info)

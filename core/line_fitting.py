@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FittedLine:
     """Represents a fitted polynomial line."""
-    poly_coeffs: np.ndarray  # Polynomial coefficients [a, b, c] for y = ax^2 + bx + c
+    poly_coeffs: np.ndarray  # Polynomial coefficients [a, b, c] for x = ay^2 + by + c
     start_point: Tuple[int, int]  # (x, y) starting point
     end_point: Tuple[int, int]  # (x, y) ending point
     class_id: int  # Lane marking class ID
@@ -70,12 +70,17 @@ class PolynomialRANSAC:
 
         Returns:
             Tuple of (coefficients, inlier_mask) or None if fitting fails
-            coefficients: polynomial coefficients [a, b, c, ...] for y = ax^n + bx^(n-1) + ...
+            coefficients: polynomial coefficients [a, b, c, ...] for x = ay^n + by^(n-1) + ...
             inlier_mask: boolean mask of inlier points
         """
         if len(points) < self.min_points:
             logger.debug(f"Not enough points for fitting: {len(points)} < {self.min_points}")
             return None
+
+        # Rotate points 90° clockwise: swap x and y
+        # Original: (x, y) -> Rotated: (y, x)
+        # This allows fitting vertical lines as x = f(y) instead of y = f(x)
+        rotated_points = np.column_stack([points[:, 1], points[:, 0]])
 
         n_samples = self.degree + 1  # Minimum samples needed
         best_inliers = None
@@ -84,28 +89,28 @@ class PolynomialRANSAC:
 
         for iteration in range(self.max_iterations):
             # Randomly sample minimum points needed
-            if len(points) < n_samples:
+            if len(rotated_points) < n_samples:
                 break
 
-            sample_indices = np.random.choice(len(points), n_samples, replace=False)
-            sample_points = points[sample_indices]
+            sample_indices = np.random.choice(len(rotated_points), n_samples, replace=False)
+            sample_points = rotated_points[sample_indices]
 
-            # Fit polynomial to sample
+            # Fit polynomial to sample: x = f(y)
             try:
-                x_sample = sample_points[:, 0]
-                y_sample = sample_points[:, 1]
-                coeffs = np.polyfit(x_sample, y_sample, self.degree)
+                y_sample = sample_points[:, 0]  # y coordinates
+                x_sample = sample_points[:, 1]  # x coordinates
+                coeffs = np.polyfit(y_sample, x_sample, self.degree)
             except (np.linalg.LinAlgError, ValueError) as e:
                 logger.debug(f"Polyfit failed at iteration {iteration}: {e}")
                 continue
 
             # Evaluate model on all points
-            x_all = points[:, 0]
-            y_all = points[:, 1]
-            y_pred = np.polyval(coeffs, x_all)
+            y_all = rotated_points[:, 0]
+            x_all = rotated_points[:, 1]
+            x_pred = np.polyval(coeffs, y_all)
 
             # Find inliers
-            distances = np.abs(y_all - y_pred)
+            distances = np.abs(x_all - x_pred)
             inlier_mask = distances < self.inlier_threshold
             inlier_count = np.sum(inlier_mask)
 
@@ -120,18 +125,20 @@ class PolynomialRANSAC:
             logger.debug("RANSAC failed to find any valid model")
             return None
 
-        inlier_ratio = best_inlier_count / len(points)
+        inlier_ratio = best_inlier_count / len(rotated_points)
         if inlier_ratio < self.min_inlier_ratio:
             logger.debug(f"Inlier ratio too low: {inlier_ratio:.2f} < {self.min_inlier_ratio}")
             return None
 
         # Refit on all inliers for better accuracy
-        inlier_points = points[best_inliers]
+        inlier_points = rotated_points[best_inliers]
         try:
             final_coeffs = np.polyfit(inlier_points[:, 0], inlier_points[:, 1], self.degree)
         except (np.linalg.LinAlgError, ValueError):
             final_coeffs = best_coeffs
 
+        # Note: coefficients are now for x = f(y), not y = f(x)
+        # The caller needs to handle this when evaluating the curve
         return final_coeffs, best_inliers
 
 
@@ -351,20 +358,21 @@ class LineFitter:
         inlier_ratio = np.sum(inlier_mask) / len(points)
 
         # Determine start and end points
+        # Note: coeffs are for x = f(y), so we need to find y_min and y_max
         inlier_points = points[inlier_mask]
-        x_min, x_max = int(inlier_points[:, 0].min()), int(inlier_points[:, 0].max())
+        y_min, y_max = int(inlier_points[:, 1].min()), int(inlier_points[:, 1].max())
 
-        # Evaluate polynomial at endpoints
-        y_start = int(np.polyval(coeffs, x_min))
-        y_end = int(np.polyval(coeffs, x_max))
+        # Evaluate polynomial at endpoints: x = f(y)
+        x_start = int(np.polyval(coeffs, y_min))
+        x_end = int(np.polyval(coeffs, y_max))
 
         # Calculate curvature (absolute value of quadratic coefficient)
         curvature = abs(coeffs[0]) if len(coeffs) >= 3 else 0.0
 
         fitted_line = FittedLine(
             poly_coeffs=coeffs,
-            start_point=(x_min, y_start),
-            end_point=(x_max, y_end),
+            start_point=(x_start, y_min),
+            end_point=(x_end, y_max),
             class_id=class_id,
             confidence=confidence,
             inlier_ratio=inlier_ratio,

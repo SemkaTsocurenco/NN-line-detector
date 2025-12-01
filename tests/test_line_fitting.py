@@ -8,20 +8,23 @@ from core.line_fitting import LineFitter, FittedLine
 from core.detections import DetectionRaw
 
 def create_synthetic_line_mask(shape=(384, 384), poly_coeffs=None):
-    """Create a synthetic line mask for testing."""
+    """Create a synthetic line mask for testing.
+
+    Note: Now generates vertical/near-vertical lines using x = f(y) formulation.
+    """
     if poly_coeffs is None:
-        poly_coeffs = [0.0005, -0.3, 250]  # Parabola: y = 0.0005*x^2 - 0.3*x + 250
+        poly_coeffs = [0.0005, -0.3, 250]  # Parabola: x = 0.0005*y^2 - 0.3*y + 250
 
     h, w = shape
     mask = np.zeros((h, w), dtype=np.uint8)
 
-    # Generate points along the polynomial
-    x_vals = np.arange(50, w - 50, 2)
-    y_vals = np.polyval(poly_coeffs, x_vals)
+    # Generate points along the polynomial (x = f(y) for vertical lines)
+    y_vals = np.arange(50, h - 50, 2)
+    x_vals = np.polyval(poly_coeffs, y_vals)
 
     # Add some noise
-    noise = np.random.randn(len(y_vals)) * 3
-    y_vals = y_vals + noise
+    noise = np.random.randn(len(x_vals)) * 3
+    x_vals = x_vals + noise
 
     # Draw on mask
     for x, y in zip(x_vals, y_vals):
@@ -77,14 +80,14 @@ def test_line_fitting():
     # Visualize result
     vis_img = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-    # Draw fitted line
+    # Draw fitted line (poly_coeffs are now for x = f(y))
     x_start, y_start = fitted_line.start_point
     x_end, y_end = fitted_line.end_point
 
-    if x_start != x_end:
-        num_points = max(abs(x_end - x_start), 50)
-        x_values = np.linspace(x_start, x_end, num_points)
-        y_values = np.polyval(fitted_line.poly_coeffs, x_values)
+    if y_start != y_end:
+        num_points = max(abs(y_end - y_start), 50)
+        y_values = np.linspace(y_start, y_end, num_points)
+        x_values = np.polyval(fitted_line.poly_coeffs, y_values)
         points = np.column_stack([x_values, y_values]).astype(np.int32)
 
         cv2.polylines(vis_img, [points], isClosed=False, color=(0, 255, 0), thickness=2)

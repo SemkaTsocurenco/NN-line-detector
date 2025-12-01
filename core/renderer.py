@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from core.detections import DetectionRaw, LaneSummary, LineColor, LaneType
+
+logger = logging.getLogger(__name__)
 
 
 class Renderer:
@@ -14,11 +17,12 @@ class Renderer:
         self._color_cache: Dict[int, tuple[int, int, int]] = {}
 
         # Define colors for lane markings (BGR format for OpenCV)
+        # Using bright, saturated colors for visibility
         self.line_colors = {
-            LineColor.WHITE: (255, 255, 255),
-            LineColor.YELLOW: (0, 255, 255),
-            LineColor.RED: (0, 0, 255),
-            LineColor.UNKNOWN: (128, 128, 128),
+            LineColor.WHITE: (255, 255, 255),  # White
+            LineColor.YELLOW: (0, 255, 255),   # Bright Yellow (BGR)
+            LineColor.RED: (0, 0, 255),         # Bright Red
+            LineColor.UNKNOWN: (200, 200, 200), # Light gray
         }
 
     def render(
@@ -27,34 +31,75 @@ class Renderer:
         detections: Iterable[DetectionRaw],
         summary: Optional[LaneSummary] = None,
         fitted_lines: Optional[List] = None,
+        show_masks: bool = False,
     ) -> np.ndarray:
         img = frame.copy()
 
-        # Draw fitted lines (classes 4-10)
+        # Draw masks from neural network if requested
+        if show_masks:
+            for det in detections:
+                if det.mask is not None:
+                    self._draw_mask(img, det)
+
+        # Convert detections to list and filter by priority
+        det_list = list(detections)
+
+        # Remove overlapping detections - keep higher priority ones
+        filtered_dets = self._filter_overlapping_detections(det_list)
+
+        # Separate detections by priority (render order: low to high)
+        # Priority groups:
+        # 1. Lines (lowest priority - draw first, can be covered)
+        # 2. Road surface markings (channelizing, box junction)
+        # 3. Stop lines and crosswalks
+        # 4. Arrows and icons (highest priority - draw last)
+
+        lines = []
+        surface_marks = []
+        stop_cross = []
+        arrows_icons = []
+
+        for det in filtered_dets:
+            if det.class_id in {4, 5, 6, 7, 8, 9, 10}:  # Lines
+                lines.append(det)
+            elif det.class_id in {1, 16}:  # Box junction, channelizing
+                surface_marks.append(det)
+            elif det.class_id in {2, 3}:  # Crosswalk, stop line
+                stop_cross.append(det)
+            elif det.class_id in {11, 12, 13, 14, 15, 22, 23}:  # Arrows, icons
+                arrows_icons.append(det)
+
+        # Draw in priority order (lowest to highest)
+
+        # 1. Draw fitted lines (lowest priority)
         if fitted_lines:
-            for fitted_line in fitted_lines:
+            # Filter out lines that are overlapped by higher priority objects
+            filtered_lines = self._filter_lines_by_detections(fitted_lines, surface_marks + stop_cross + arrows_icons)
+            for fitted_line in filtered_lines:
                 self._draw_fitted_line(img, fitted_line)
 
-        # Draw other objects (arrows, crosswalks, etc.) with perspective
-        for det in detections:
-            # Skip line classes (they are drawn via fitted_lines)
-            if det.class_id in {4, 5, 6, 7, 8, 9, 10}:
-                continue
-
-            # Draw objects based on class
-            if det.class_id in {11, 12, 13, 14, 15}:  # Arrows
-                self._draw_arrow(img, det)
-            elif det.class_id == 2:  # Crosswalk
-                self._draw_crosswalk(img, det)
-            elif det.class_id == 3:  # Stop line
-                self._draw_stop_line(img, det)
-            elif det.class_id == 1:  # Box junction
+        # 2. Draw surface markings
+        for det in surface_marks:
+            if det.class_id == 1:
                 self._draw_box_junction(img, det)
-            elif det.class_id in {16}:  # Channelizing line
+            elif det.class_id == 16:
                 self._draw_channelizing_line(img, det)
-            elif det.class_id in {22, 23}:  # Icons (motor, bike)
+
+        # 3. Draw stop lines and crosswalks
+        for det in stop_cross:
+            if det.class_id == 2:
+                self._draw_crosswalk(img, det)
+            elif det.class_id == 3:
+                self._draw_stop_line(img, det)
+
+        # 4. Draw arrows and icons (highest priority - always visible)
+        logger.debug(f"Drawing {len(arrows_icons)} arrows/icons")
+        for det in arrows_icons:
+            if det.class_id in {11, 12, 13, 14, 15}:
+                logger.debug(f"Attempting to draw arrow: class_id={det.class_id}, confidence={det.confidence:.2f}")
+                self._draw_arrow(img, det)
+            elif det.class_id in {22, 23}:
                 self._draw_icon(img, det)
-            # Add more object types as needed
 
         if summary:
             text = (
@@ -65,10 +110,214 @@ class Renderer:
         return img
 
     def _color_for_class(self, class_id: int) -> tuple[int, int, int]:
+        """Get a consistent color for each class ID."""
         if class_id not in self._color_cache:
             rng = np.random.default_rng(class_id)
             self._color_cache[class_id] = tuple(int(x) for x in rng.integers(0, 255, size=3))
         return self._color_cache[class_id]
+
+    def _draw_mask(self, img: np.ndarray, det: DetectionRaw) -> None:
+        """
+        Draw detection mask with semi-transparent color overlay.
+
+        Args:
+            img: Image to draw on (modified in-place)
+            det: Detection with mask to draw
+        """
+        if det.mask is None:
+            return
+
+        # Get color for this class
+        color = self._color_for_class(det.class_id)
+
+        # Convert mask to binary
+        mask = (det.mask > 127).astype(np.uint8)
+
+        # Create colored overlay
+        overlay = img.copy()
+        overlay[mask > 0] = color
+
+        # Blend with original image (semi-transparent)
+        alpha = 0.4  # Transparency level
+        cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
+        # Draw mask contour for better visibility
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            # Draw black outline first
+            cv2.drawContours(img, contours, -1, (0, 0, 0), 3)
+            # Draw colored contour on top
+            cv2.drawContours(img, contours, -1, color, 2)
+
+    @staticmethod
+    def _get_detection_priority(class_id: int) -> int:
+        """
+        Get priority for class ID. Higher number = higher priority (drawn last).
+
+        Priority levels:
+        1: Lines (can be covered by everything)
+        2: Surface markings (box junction, channelizing)
+        3: Stop lines and crosswalks
+        4: Arrows and icons (highest priority)
+        """
+        if class_id in {4, 5, 6, 7, 8, 9, 10}:  # Lines
+            return 1
+        elif class_id in {1, 16}:  # Box junction, channelizing
+            return 2
+        elif class_id in {2, 3}:  # Crosswalk, stop line
+            return 3
+        elif class_id in {11, 12, 13, 14, 15, 22, 23}:  # Arrows, icons
+            return 4
+        else:
+            return 0  # Unknown
+
+    @staticmethod
+    def _masks_overlap(det1: DetectionRaw, det2: DetectionRaw, threshold: float = 0.3) -> bool:
+        """
+        Check if two detection masks overlap significantly.
+
+        Args:
+            det1, det2: Detections to check
+            threshold: Minimum overlap ratio to consider as overlapping
+
+        Returns:
+            True if masks overlap more than threshold
+        """
+        if det1.mask is None or det2.mask is None:
+            return False
+
+        # Convert masks to binary
+        mask1 = (det1.mask > 127).astype(np.uint8)
+        mask2 = (det2.mask > 127).astype(np.uint8)
+
+        # Calculate intersection and union
+        intersection = np.sum(mask1 & mask2)
+        area1 = np.sum(mask1)
+        area2 = np.sum(mask2)
+
+        if area1 == 0 or area2 == 0:
+            return False
+
+        # Calculate overlap ratio (intersection / smaller area)
+        overlap_ratio = intersection / min(area1, area2)
+
+        return overlap_ratio > threshold
+
+    def _filter_overlapping_detections(self, detections: List[DetectionRaw]) -> List[DetectionRaw]:
+        """
+        Filter overlapping detections, keeping only the highest priority ones.
+
+        Args:
+            detections: List of all detections
+
+        Returns:
+            Filtered list with overlapping lower-priority detections removed
+        """
+        if not detections:
+            return []
+
+        # Sort by priority (highest first) and confidence
+        sorted_dets = sorted(
+            detections,
+            key=lambda d: (self._get_detection_priority(d.class_id), d.confidence),
+            reverse=True
+        )
+
+        filtered = []
+
+        for det in sorted_dets:
+            # Check if this detection overlaps with any already accepted higher-priority detection
+            is_overlapped = False
+            for accepted in filtered:
+                # Only filter if overlapped by HIGHER priority
+                if self._get_detection_priority(accepted.class_id) > self._get_detection_priority(det.class_id):
+                    if self._masks_overlap(det, accepted, threshold=0.7):  # Increased threshold to 70%
+                        is_overlapped = True
+                        logger.debug(f"Filtering class {det.class_id} overlapped by class {accepted.class_id}")
+                        break
+
+            if not is_overlapped:
+                filtered.append(det)
+            else:
+                logger.debug(f"Skipped detection: class_id={det.class_id}, confidence={det.confidence:.2f}")
+
+        return filtered
+
+    @staticmethod
+    def _line_overlaps_detection(fitted_line, detection: DetectionRaw, threshold: float = 0.3) -> bool:
+        """
+        Check if a fitted line overlaps with a detection mask.
+
+        Args:
+            fitted_line: FittedLine object
+            detection: Detection to check against
+            threshold: Overlap threshold
+
+        Returns:
+            True if line passes through the detection mask
+        """
+        if detection.mask is None:
+            return False
+
+        # Get line points
+        x_start, y_start = fitted_line.start_point
+        x_end, y_end = fitted_line.end_point
+
+        if y_start == y_end:
+            return False
+
+        # Sample points along the line
+        num_points = max(abs(y_end - y_start), 50)
+        y_values = np.linspace(y_start, y_end, num_points)
+        x_values = np.polyval(fitted_line.poly_coeffs, y_values)
+
+        # Check how many line points fall inside the detection mask
+        mask = (detection.mask > 127).astype(np.uint8)
+        h, w = mask.shape
+
+        points_in_mask = 0
+        valid_points = 0
+
+        for x, y in zip(x_values, y_values):
+            xi, yi = int(x), int(y)
+            if 0 <= xi < w and 0 <= yi < h:
+                valid_points += 1
+                if mask[yi, xi] > 0:
+                    points_in_mask += 1
+
+        if valid_points == 0:
+            return False
+
+        overlap_ratio = points_in_mask / valid_points
+        return overlap_ratio > threshold
+
+    def _filter_lines_by_detections(self, fitted_lines: List, detections: List[DetectionRaw]) -> List:
+        """
+        Filter out fitted lines that are overlapped by higher-priority detections.
+
+        Args:
+            fitted_lines: List of FittedLine objects
+            detections: List of higher-priority detections
+
+        Returns:
+            Filtered list of lines
+        """
+        if not fitted_lines or not detections:
+            return fitted_lines
+
+        filtered = []
+        for line in fitted_lines:
+            # Check if this line is overlapped by any detection
+            is_overlapped = False
+            for det in detections:
+                if self._line_overlaps_detection(line, det, threshold=0.4):
+                    is_overlapped = True
+                    break
+
+            if not is_overlapped:
+                filtered.append(line)
+
+        return filtered
 
     def _draw_fitted_line(self, img: np.ndarray, fitted_line) -> None:
         """
@@ -86,16 +335,17 @@ class Renderer:
         line_style = self._get_line_style_from_class(fitted_line.class_id)
 
         # Generate points along the polynomial
+        # Note: poly_coeffs are for x = f(y), not y = f(x)
         x_start, y_start = fitted_line.start_point
         x_end, y_end = fitted_line.end_point
 
-        if x_start == x_end:
+        if y_start == y_end:
             return  # Degenerate line
 
-        # Sample points along x-axis
-        num_points = max(abs(x_end - x_start), 50)
-        x_values = np.linspace(x_start, x_end, num_points)
-        y_values = np.polyval(fitted_line.poly_coeffs, x_values)
+        # Sample points along y-axis (since x = f(y))
+        num_points = max(abs(y_end - y_start), 50)
+        y_values = np.linspace(y_start, y_end, num_points)
+        x_values = np.polyval(fitted_line.poly_coeffs, y_values)
 
         # Convert to integer pixel coordinates
         points = np.column_stack([x_values, y_values]).astype(np.int32)
@@ -108,19 +358,23 @@ class Renderer:
         if len(points) < 2:
             return
 
-        # Draw based on line style
+        # Draw based on line style with black outline for visibility
+        thickness = 6  # Increased thickness for better visibility
         if line_style == LaneType.SOLID:
-            self._draw_solid_line(img, points, bgr_color, thickness=4)
+            self._draw_solid_line(img, points, bgr_color, thickness=thickness)
         elif line_style == LaneType.DASHED:
-            self._draw_dashed_line(img, points, bgr_color, thickness=4)
+            self._draw_dashed_line(img, points, bgr_color, thickness=thickness)
         elif line_style == LaneType.DOUBLE:
-            self._draw_double_line(img, points, bgr_color, thickness=4)
+            self._draw_double_line(img, points, bgr_color, thickness=thickness)
         else:
             # Default: solid line
-            self._draw_solid_line(img, points, bgr_color, thickness=4)
+            self._draw_solid_line(img, points, bgr_color, thickness=thickness)
 
     def _draw_solid_line(self, img: np.ndarray, points: np.ndarray, color: Tuple[int, int, int], thickness: int = 4) -> None:
-        """Draw a solid line through points."""
+        """Draw a solid line through points with black outline."""
+        # Draw black outline first (thicker)
+        cv2.polylines(img, [points], isClosed=False, color=(0, 0, 0), thickness=thickness + 2, lineType=cv2.LINE_AA)
+        # Draw colored line on top
         cv2.polylines(img, [points], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
 
     def _draw_dashed_line(
@@ -165,6 +419,9 @@ class Renderer:
             end_pt = self._interpolate_point(points, segment_lengths, end_length)
 
             if is_dash and start_pt is not None and end_pt is not None:
+                # Draw black outline first
+                cv2.line(img, tuple(start_pt), tuple(end_pt), (0, 0, 0), thickness + 2, lineType=cv2.LINE_AA)
+                # Draw colored dash on top
                 cv2.line(img, tuple(start_pt), tuple(end_pt), color, thickness, lineType=cv2.LINE_AA)
 
             current_length = end_length
@@ -219,10 +476,19 @@ class Renderer:
                 left_points.append((int(p_last[0] + perp_x * offset), int(p_last[1] + perp_y * offset)))
                 right_points.append((int(p_last[0] - perp_x * offset), int(p_last[1] - perp_y * offset)))
 
-        # Draw both lines
+        # Draw both lines with black outline
         if len(left_points) > 1:
-            cv2.polylines(img, [np.array(left_points, dtype=np.int32)], isClosed=False, color=color, thickness=thickness // 2, lineType=cv2.LINE_AA)
-            cv2.polylines(img, [np.array(right_points, dtype=np.int32)], isClosed=False, color=color, thickness=thickness // 2, lineType=cv2.LINE_AA)
+            left_arr = np.array(left_points, dtype=np.int32)
+            right_arr = np.array(right_points, dtype=np.int32)
+            line_thickness = thickness // 2
+
+            # Draw black outlines first
+            cv2.polylines(img, [left_arr], isClosed=False, color=(0, 0, 0), thickness=line_thickness + 2, lineType=cv2.LINE_AA)
+            cv2.polylines(img, [right_arr], isClosed=False, color=(0, 0, 0), thickness=line_thickness + 2, lineType=cv2.LINE_AA)
+
+            # Draw colored lines on top
+            cv2.polylines(img, [left_arr], isClosed=False, color=color, thickness=line_thickness, lineType=cv2.LINE_AA)
+            cv2.polylines(img, [right_arr], isClosed=False, color=color, thickness=line_thickness, lineType=cv2.LINE_AA)
 
     @staticmethod
     def _interpolate_point(points: np.ndarray, segment_lengths: List[float], target_length: float) -> Optional[np.ndarray]:
@@ -263,7 +529,7 @@ class Renderer:
 
     def _draw_arrow(self, img: np.ndarray, det: DetectionRaw) -> None:
         """Draw arrow based on detection with perspective transformation."""
-        if det.mask is None or det.bbox is None:
+        if det.mask is None:
             return
 
         # Get arrow direction from class_id
@@ -272,27 +538,55 @@ class Renderer:
 
         # Extract mask contour for perspective
         mask = (det.mask > 127).astype(np.uint8) * 255
+
+        # Check if mask has enough pixels (reduced threshold for distant arrows)
+        mask_area = np.sum(mask > 0)
+        if mask_area < 25:  # Reduced from 100 to 25 for distant arrows
+            logger.debug(f"Arrow mask too small: {mask_area} pixels, class_id={det.class_id}")
+            return
+
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
+            logger.debug(f"No contours found for arrow, class_id={det.class_id}")
             return
 
         # Get largest contour
         contour = max(contours, key=cv2.contourArea)
+        contour_area = cv2.contourArea(contour)
+
+        if contour_area < 20:  # Reduced from 50 to 20 for distant arrows
+            logger.debug(f"Arrow contour too small: {contour_area}, class_id={det.class_id}")
+            return
 
         # Get rotated bounding box for perspective
         rect = cv2.minAreaRect(contour)
         box = cv2.boxPoints(rect)
         box = np.int32(box)
 
+        # Check if box is degenerate (reduced minimum size)
+        box_width = np.linalg.norm(box[0] - box[1])
+        box_height = np.linalg.norm(box[1] - box[2])
+
+        if box_width < 3 or box_height < 3:  # Reduced from 5 to 3 for distant arrows
+            logger.debug(f"Arrow box too small: {box_width:.1f}x{box_height:.1f}, class_id={det.class_id}")
+            return
+
         # Sort points: top-left, top-right, bottom-right, bottom-left
-        box_sorted = self._sort_box_points(box)
+        try:
+            box_sorted = self._sort_box_points(box)
+        except Exception as e:
+            logger.debug(f"Failed to sort arrow box: {e}, class_id={det.class_id}")
+            return
 
         # Create arrow template
         arrow_img = self._create_arrow_template(arrow_type)
 
         # Warp arrow to fit detection with perspective
-        self._warp_and_draw(img, arrow_img, box_sorted)
+        try:
+            self._warp_and_draw(img, arrow_img, box_sorted)
+        except Exception as e:
+            logger.debug(f"Failed to warp arrow: {e}, class_id={det.class_id}")
 
     @staticmethod
     def _get_arrow_type(class_id: int) -> str:
@@ -308,18 +602,30 @@ class Renderer:
 
     @staticmethod
     def _create_arrow_template(arrow_type: str, size: int = 200) -> np.ndarray:
-        """Create arrow template image."""
+        """Create arrow template image with bright color and black outline."""
         img = np.zeros((size, size, 4), dtype=np.uint8)  # RGBA
-        color = (255, 255, 255, 255)  # White with alpha
-        thickness = 20
-        tip_size = 40
+
+        # Use bright cyan/green color for better visibility
+        color = (0, 255, 255, 255)  # Bright cyan (BGR + Alpha)
+        outline_color = (0, 0, 0, 255)  # Black outline
+        thickness = 22
+        outline_thickness = 28  # Thicker for outline
+        tip_size = 45
 
         center_x, center_y = size // 2, size // 2
 
         if arrow_type == "straight":
-            # Vertical arrow up
+            # Vertical arrow up - draw outline first
+            cv2.line(img, (center_x, size - 40), (center_x, 40), outline_color, outline_thickness)
+            pts_outline = np.array([
+                [center_x, 20],
+                [center_x - tip_size - 5, 20 + tip_size + 5],
+                [center_x + tip_size + 5, 20 + tip_size + 5]
+            ], np.int32)
+            cv2.fillPoly(img, [pts_outline], outline_color)
+
+            # Draw colored arrow on top
             cv2.line(img, (center_x, size - 40), (center_x, 40), color, thickness)
-            # Arrow head
             pts = np.array([
                 [center_x, 20],
                 [center_x - tip_size, 20 + tip_size],
@@ -328,9 +634,17 @@ class Renderer:
             cv2.fillPoly(img, [pts], color)
 
         elif arrow_type == "left":
-            # Arrow pointing left
+            # Arrow pointing left - outline first
+            cv2.line(img, (size - 40, center_y), (40, center_y), outline_color, outline_thickness)
+            pts_outline = np.array([
+                [20, center_y],
+                [20 + tip_size + 5, center_y - tip_size - 5],
+                [20 + tip_size + 5, center_y + tip_size + 5]
+            ], np.int32)
+            cv2.fillPoly(img, [pts_outline], outline_color)
+
+            # Colored arrow on top
             cv2.line(img, (size - 40, center_y), (40, center_y), color, thickness)
-            # Arrow head
             pts = np.array([
                 [20, center_y],
                 [20 + tip_size, center_y - tip_size],
@@ -339,9 +653,17 @@ class Renderer:
             cv2.fillPoly(img, [pts], color)
 
         elif arrow_type == "right":
-            # Arrow pointing right
+            # Arrow pointing right - outline first
+            cv2.line(img, (40, center_y), (size - 40, center_y), outline_color, outline_thickness)
+            pts_outline = np.array([
+                [size - 20, center_y],
+                [size - 20 - tip_size - 5, center_y - tip_size - 5],
+                [size - 20 - tip_size - 5, center_y + tip_size + 5]
+            ], np.int32)
+            cv2.fillPoly(img, [pts_outline], outline_color)
+
+            # Colored arrow on top
             cv2.line(img, (40, center_y), (size - 40, center_y), color, thickness)
-            # Arrow head
             pts = np.array([
                 [size - 20, center_y],
                 [size - 20 - tip_size, center_y - tip_size],
@@ -350,40 +672,84 @@ class Renderer:
             cv2.fillPoly(img, [pts], color)
 
         elif arrow_type == "left_straight":
-            # Combined left and straight
-            # Straight arrow
-            cv2.line(img, (center_x + 30, size - 40), (center_x + 30, 40), color, thickness - 5)
+            # Combined left and straight with outlines
+            comb_thick = thickness - 7
+            comb_outline = outline_thickness - 7
+            tip_s = 35
+
+            # Straight arrow - outline
+            cv2.line(img, (center_x + 30, size - 40), (center_x + 30, 40), outline_color, comb_outline)
+            pts_s_outline = np.array([
+                [center_x + 30, 20],
+                [center_x + 30 - tip_s - 3, 20 + tip_s + 3],
+                [center_x + 30 + tip_s + 3, 20 + tip_s + 3]
+            ], np.int32)
+            cv2.fillPoly(img, [pts_s_outline], outline_color)
+
+            # Left arrow - outline
+            cv2.line(img, (size - 40, center_y - 30), (40, center_y - 30), outline_color, comb_outline)
+            pts_l_outline = np.array([
+                [20, center_y - 30],
+                [20 + tip_s + 3, center_y - 30 - tip_s - 3],
+                [20 + tip_s + 3, center_y - 30 + tip_s + 3]
+            ], np.int32)
+            cv2.fillPoly(img, [pts_l_outline], outline_color)
+
+            # Colored arrows on top
+            cv2.line(img, (center_x + 30, size - 40), (center_x + 30, 40), color, comb_thick)
             pts_straight = np.array([
                 [center_x + 30, 20],
-                [center_x + 30 - 30, 20 + 30],
-                [center_x + 30 + 30, 20 + 30]
+                [center_x + 30 - tip_s, 20 + tip_s],
+                [center_x + 30 + tip_s, 20 + tip_s]
             ], np.int32)
             cv2.fillPoly(img, [pts_straight], color)
-            # Left arrow
-            cv2.line(img, (size - 40, center_y - 30), (40, center_y - 30), color, thickness - 5)
+
+            cv2.line(img, (size - 40, center_y - 30), (40, center_y - 30), color, comb_thick)
             pts_left = np.array([
                 [20, center_y - 30],
-                [20 + 30, center_y - 30 - 30],
-                [20 + 30, center_y - 30 + 30]
+                [20 + tip_s, center_y - 30 - tip_s],
+                [20 + tip_s, center_y - 30 + tip_s]
             ], np.int32)
             cv2.fillPoly(img, [pts_left], color)
 
         elif arrow_type == "right_straight":
-            # Combined right and straight
-            # Straight arrow
-            cv2.line(img, (center_x - 30, size - 40), (center_x - 30, 40), color, thickness - 5)
+            # Combined right and straight with outlines
+            comb_thick = thickness - 7
+            comb_outline = outline_thickness - 7
+            tip_s = 35
+
+            # Straight arrow - outline
+            cv2.line(img, (center_x - 30, size - 40), (center_x - 30, 40), outline_color, comb_outline)
+            pts_s_outline = np.array([
+                [center_x - 30, 20],
+                [center_x - 30 - tip_s - 3, 20 + tip_s + 3],
+                [center_x - 30 + tip_s + 3, 20 + tip_s + 3]
+            ], np.int32)
+            cv2.fillPoly(img, [pts_s_outline], outline_color)
+
+            # Right arrow - outline
+            cv2.line(img, (40, center_y + 30), (size - 40, center_y + 30), outline_color, comb_outline)
+            pts_r_outline = np.array([
+                [size - 20, center_y + 30],
+                [size - 20 - tip_s - 3, center_y + 30 - tip_s - 3],
+                [size - 20 - tip_s - 3, center_y + 30 + tip_s + 3]
+            ], np.int32)
+            cv2.fillPoly(img, [pts_r_outline], outline_color)
+
+            # Colored arrows on top
+            cv2.line(img, (center_x - 30, size - 40), (center_x - 30, 40), color, comb_thick)
             pts_straight = np.array([
                 [center_x - 30, 20],
-                [center_x - 30 - 30, 20 + 30],
-                [center_x - 30 + 30, 20 + 30]
+                [center_x - 30 - tip_s, 20 + tip_s],
+                [center_x - 30 + tip_s, 20 + tip_s]
             ], np.int32)
             cv2.fillPoly(img, [pts_straight], color)
-            # Right arrow
-            cv2.line(img, (40, center_y + 30), (size - 40, center_y + 30), color, thickness - 5)
+
+            cv2.line(img, (40, center_y + 30), (size - 40, center_y + 30), color, comb_thick)
             pts_right = np.array([
                 [size - 20, center_y + 30],
-                [size - 20 - 30, center_y + 30 - 30],
-                [size - 20 - 30, center_y + 30 + 30]
+                [size - 20 - tip_s, center_y + 30 - tip_s],
+                [size - 20 - tip_s, center_y + 30 + tip_s]
             ], np.int32)
             cv2.fillPoly(img, [pts_right], color)
 
@@ -406,7 +772,7 @@ class Renderer:
         return np.array([top_points[0], top_points[1], bottom_points[1], bottom_points[0]], dtype=np.float32)
 
     @staticmethod
-    def _warp_and_draw(img: np.ndarray, overlay: np.ndarray, dst_points: np.ndarray, alpha: float = 0.8) -> None:
+    def _warp_and_draw(img: np.ndarray, overlay: np.ndarray, dst_points: np.ndarray, alpha: float = 0.9) -> None:
         """Warp overlay image to fit dst_points and blend with img."""
         h, w = overlay.shape[:2]
 
@@ -433,7 +799,7 @@ class Renderer:
             alpha_channel = np.any(warped > 0, axis=2).astype(np.float32) * alpha
             overlay_rgb = warped
 
-        # Blend
+        # Blend with increased opacity for better visibility
         for c in range(3):
             img[:, :, c] = img[:, :, c] * (1 - alpha_channel) + overlay_rgb[:, :, c] * alpha_channel
 
@@ -458,8 +824,8 @@ class Renderer:
         # Create crosswalk template
         crosswalk_img = self._create_crosswalk_template()
 
-        # Warp and draw
-        self._warp_and_draw(img, crosswalk_img, box_sorted, alpha=0.7)
+        # Warp and draw with higher opacity
+        self._warp_and_draw(img, crosswalk_img, box_sorted, alpha=0.9)
 
     @staticmethod
     def _create_crosswalk_template(size: int = 200) -> np.ndarray:
@@ -478,7 +844,7 @@ class Renderer:
         return img
 
     def _draw_stop_line(self, img: np.ndarray, det: DetectionRaw) -> None:
-        """Draw stop line."""
+        """Draw stop line with outline for visibility."""
         if det.mask is None:
             return
 
@@ -494,7 +860,9 @@ class Renderer:
         box = cv2.boxPoints(rect)
         box = np.int32(box)
 
-        # Draw thick white line along the contour
+        # Draw black outline first
+        cv2.drawContours(img, [box], 0, (0, 0, 0), 12)
+        # Draw bright white line on top
         cv2.drawContours(img, [box], 0, (255, 255, 255), 8)
 
     def _draw_box_junction(self, img: np.ndarray, det: DetectionRaw) -> None:
@@ -515,16 +883,16 @@ class Renderer:
 
         # Create box junction template (diagonal lines)
         junction_img = self._create_box_junction_template()
-        self._warp_and_draw(img, junction_img, box_sorted, alpha=0.6)
+        self._warp_and_draw(img, junction_img, box_sorted, alpha=0.85)
 
     @staticmethod
     def _create_box_junction_template(size: int = 200) -> np.ndarray:
-        """Create box junction template with diagonal grid."""
+        """Create box junction template with diagonal grid and bright colors."""
         img = np.zeros((size, size, 4), dtype=np.uint8)
-        color = (0, 255, 255, 255)  # Yellow
+        color = (0, 255, 255, 255)  # Bright yellow (BGR)
 
-        thickness = 5
-        spacing = 30
+        thickness = 7  # Increased thickness
+        spacing = 25
 
         # Draw diagonal lines (both directions)
         for offset in range(-size, size * 2, spacing):
@@ -536,23 +904,23 @@ class Renderer:
         return img
 
     def _draw_channelizing_line(self, img: np.ndarray, det: DetectionRaw) -> None:
-        """Draw channelizing line (similar to solid line but thicker)."""
+        """Draw channelizing line with bright yellow color."""
         if det.mask is None:
             return
 
         mask = (det.mask > 127).astype(np.uint8) * 255
-        # Draw mask with yellow color
+        # Draw mask with bright yellow color
         colored_mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        colored_mask[mask > 0] = [0, 255, 255]  # Yellow
+        colored_mask[mask > 0] = [0, 255, 255]  # Bright yellow (BGR)
 
-        # Blend
-        alpha = 0.6
+        # Blend with higher opacity
+        alpha = 0.85
         mask_f = (mask.astype(np.float32) / 255.0) * alpha
         for c in range(3):
             img[:, :, c] = img[:, :, c] * (1 - mask_f) + colored_mask[:, :, c] * mask_f
 
     def _draw_icon(self, img: np.ndarray, det: DetectionRaw) -> None:
-        """Draw icons (motor, bike) as simple symbols."""
+        """Draw icons (motor, bike) as bright symbols with outline."""
         if det.bbox is None:
             return
 
@@ -561,15 +929,31 @@ class Renderer:
         center_y = (y1 + y2) // 2
         size = min(x2 - x1, y2 - y1)
 
+        # Use bright cyan color for visibility
+        icon_color = (0, 255, 255)  # Bright cyan (BGR)
+        outline_color = (0, 0, 0)  # Black outline
+        thickness = 3
+
         if det.class_id == 22:  # motor_icon
-            # Draw simple car shape
+            # Draw simple car shape with outline
+            # Outline
             cv2.rectangle(img, (center_x - size // 3, center_y - size // 4),
-                         (center_x + size // 3, center_y + size // 4), (255, 255, 255), 2)
-            cv2.circle(img, (center_x - size // 4, center_y + size // 4), size // 10, (255, 255, 255), -1)
-            cv2.circle(img, (center_x + size // 4, center_y + size // 4), size // 10, (255, 255, 255), -1)
+                         (center_x + size // 3, center_y + size // 4), outline_color, thickness + 2)
+            cv2.circle(img, (center_x - size // 4, center_y + size // 4), size // 10, outline_color, thickness + 2)
+            cv2.circle(img, (center_x + size // 4, center_y + size // 4), size // 10, outline_color, thickness + 2)
+            # Icon
+            cv2.rectangle(img, (center_x - size // 3, center_y - size // 4),
+                         (center_x + size // 3, center_y + size // 4), icon_color, thickness)
+            cv2.circle(img, (center_x - size // 4, center_y + size // 4), size // 10, icon_color, -1)
+            cv2.circle(img, (center_x + size // 4, center_y + size // 4), size // 10, icon_color, -1)
 
         elif det.class_id == 23:  # bike_icon
-            # Draw simple bike shape
-            cv2.circle(img, (center_x - size // 4, center_y), size // 8, (255, 255, 255), 2)
-            cv2.circle(img, (center_x + size // 4, center_y), size // 8, (255, 255, 255), 2)
-            cv2.line(img, (center_x - size // 4, center_y), (center_x + size // 4, center_y), (255, 255, 255), 2)
+            # Draw simple bike shape with outline
+            # Outline
+            cv2.circle(img, (center_x - size // 4, center_y), size // 8, outline_color, thickness + 2)
+            cv2.circle(img, (center_x + size // 4, center_y), size // 8, outline_color, thickness + 2)
+            cv2.line(img, (center_x - size // 4, center_y), (center_x + size // 4, center_y), outline_color, thickness + 2)
+            # Icon
+            cv2.circle(img, (center_x - size // 4, center_y), size // 8, icon_color, thickness)
+            cv2.circle(img, (center_x + size // 4, center_y), size // 8, icon_color, thickness)
+            cv2.line(img, (center_x - size // 4, center_y), (center_x + size // 4, center_y), icon_color, thickness)

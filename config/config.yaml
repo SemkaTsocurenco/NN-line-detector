@@ -38,8 +38,8 @@ nn:
     '23': bike_icon
     '24': parking_lot
 postprocess:
-  confidence_threshold: 0.6
-  min_area: 170.0
+  confidence_threshold: 0.7099999999999997
+  min_area: 150.0
   merge_iou_threshold: 0.5
 line_fitting:
   enabled: true
@@ -68,3 +68,4 @@ logging:
   log_file: ''
 render:
   enabled: true
+  show_masks: true

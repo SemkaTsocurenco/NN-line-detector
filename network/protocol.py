@@ -14,9 +14,10 @@ SYNC_BYTE = 0xAA
 VERSION = 0x01
 MSG_TYPE_LANE_SUMMARY = 0x01
 MSG_TYPE_MARKING_OBJECTS = 0x02
-MAX_PAYLOAD_SIZE = 1024  # per spec: payload length constraint
 MSG_TYPE_LANE_DETAILS = 0x03
 MSG_TYPE_MARKING_OBJECTS_EX = 0x04
+MSG_TYPE_FITTED_LINES = 0x05  # Polynomial fitted lines for 3D reconstruction
+MAX_PAYLOAD_SIZE = 1024  # per spec: payload length constraint
 
 
 def crc16_ibm(data: bytes) -> int:
@@ -149,6 +150,101 @@ class ProtocolBuilder:
             )
         payload = b"".join(payload_parts)
         return self._build_frame(MSG_TYPE_MARKING_OBJECTS_EX, payload)
+
+    def build_fitted_lines_frame(self, fitted_lines: Iterable) -> bytes:
+        """
+        Build frame with polynomial fitted lines for 3D reconstruction.
+
+        Each line contains:
+        - class_id (1 byte): line marking type (4-10)
+        - side (1 byte): 0=unknown, 1=left, 2=right, 3=center
+        - color (1 byte): line color enum
+        - style (1 byte): line style enum (solid/dashed/double)
+        - poly_a (float, 4 bytes): coefficient 'a' for x = ay^2 + by + c
+        - poly_b (float, 4 bytes): coefficient 'b'
+        - poly_c (float, 4 bytes): coefficient 'c'
+        - y_start (int16, 2 bytes): start Y coordinate (pixels)
+        - y_end (int16, 2 bytes): end Y coordinate (pixels)
+        - confidence (uint8, 1 byte): detection confidence 0-255
+        - quality (uint8, 1 byte): inlier ratio 0-255
+        Total: 23 bytes per line
+        """
+        lines_list = list(fitted_lines)
+        max_lines = (MAX_PAYLOAD_SIZE - 1) // 23  # 1 byte for count, 23 per line
+        if len(lines_list) > max_lines:
+            logger.warning("Trimming fitted lines from %d to %d to satisfy frame size", len(lines_list), max_lines)
+            lines_list = lines_list[:max_lines]
+
+        count = len(lines_list)
+        payload_parts = [struct.pack("<B", count)]
+
+        for line in lines_list:
+            # Map side string to byte
+            side_map = {"unknown": 0, "left": 1, "right": 2, "center": 3}
+            side_byte = side_map.get(line.side, 0)
+
+            # Get color and style from line attributes
+            # These should be added to FittedLine or derived from class_id
+            line_color = self._get_line_color_byte(line.class_id)
+            line_style = self._get_line_style_byte(line.class_id)
+
+            # Extract polynomial coefficients [a, b, c] for x = ay^2 + by + c
+            if len(line.poly_coeffs) >= 3:
+                poly_a = float(line.poly_coeffs[0])
+                poly_b = float(line.poly_coeffs[1])
+                poly_c = float(line.poly_coeffs[2])
+            else:
+                poly_a = poly_b = poly_c = 0.0
+
+            # Get start and end Y coordinates
+            _, y_start = line.start_point
+            _, y_end = line.end_point
+
+            # Convert confidence and inlier_ratio to bytes
+            confidence_byte = int(line.confidence * 255) & 0xFF
+            quality_byte = int(line.inlier_ratio * 255) & 0xFF
+
+            payload_parts.append(
+                struct.pack(
+                    "<BBBBfffhhBB",
+                    line.class_id & 0xFF,
+                    side_byte & 0xFF,
+                    line_color & 0xFF,
+                    line_style & 0xFF,
+                    poly_a,
+                    poly_b,
+                    poly_c,
+                    y_start & 0xFFFF,
+                    y_end & 0xFFFF,
+                    confidence_byte,
+                    quality_byte,
+                )
+            )
+
+        payload = b"".join(payload_parts)
+        return self._build_frame(MSG_TYPE_FITTED_LINES, payload)
+
+    @staticmethod
+    def _get_line_color_byte(class_id: int) -> int:
+        """Map class_id to line color byte."""
+        # 5, 8, 10: yellow; 6: red; others: white
+        if class_id in {5, 8, 10}:
+            return 1  # YELLOW
+        if class_id == 6:
+            return 2  # RED
+        return 0  # WHITE
+
+    @staticmethod
+    def _get_line_style_byte(class_id: int) -> int:
+        """Map class_id to line style byte."""
+        # 4,5,6: solid; 7,8: double; 9,10: dashed
+        if class_id in {4, 5, 6}:
+            return 1  # SOLID
+        if class_id in {7, 8}:
+            return 2  # DOUBLE
+        if class_id in {9, 10}:
+            return 3  # DASHED
+        return 0  # UNKNOWN
 
     def _build_frame(self, msg_type: int, payload: bytes) -> bytes:
         seq = self.seq_counter.next()
