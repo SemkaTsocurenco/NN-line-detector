@@ -80,6 +80,23 @@ class DetectionPostprocessor:
         self.confidence_to_byte_scale = geom_cfg.get("confidence_to_byte_scale", 255)
         self.bbox_area_offset = geom_cfg.get("bbox_area_offset", 1)
 
+        # Arrow clustering parameters
+        arrow_cfg = config.get("arrow_clustering", {})
+        self.arrow_clustering_enabled = arrow_cfg.get("enabled", True)
+        self.arrow_classes = set(arrow_cfg.get("arrow_classes", [11, 12, 13, 14, 15]))
+        self.arrow_absorb_classes = set(arrow_cfg.get("absorb_classes", [4, 5, 6, 7, 8, 9, 10]))
+        self.arrow_iou_threshold = float(arrow_cfg.get("iou_threshold", 0.05))
+        self.arrow_overlap_ratio = float(arrow_cfg.get("overlap_ratio_threshold", 0.25))
+        self.arrow_absorb_overlap_ratio = float(arrow_cfg.get("absorb_overlap_ratio", 0.6))
+        self.arrow_require_center_inside = bool(arrow_cfg.get("require_center_inside", True))
+        self.arrow_max_absorb_area_ratio = float(arrow_cfg.get("max_absorb_area_ratio", 1.2))
+        self.arrow_forward_factor = float(arrow_cfg.get("forward_factor", 3.0))
+        self.arrow_lateral_factor = float(arrow_cfg.get("lateral_factor", 1.0))
+        self.arrow_min_forward_px = float(arrow_cfg.get("min_forward_px", 20.0))
+        self.arrow_min_lateral_px = float(arrow_cfg.get("min_lateral_px", 10.0))
+        self.arrow_tail_overlap_min = float(arrow_cfg.get("tail_overlap_min", 0.1))
+        self.arrow_tail_area_ratio = float(arrow_cfg.get("tail_area_ratio", 3.0))
+
     def update_params(self, params: PostprocessParams) -> None:
         self.params = params
 
@@ -94,6 +111,8 @@ class DetectionPostprocessor:
             filtered.append(det)
 
         merged = self._merge_by_class(filtered)
+        if self.arrow_clustering_enabled:
+            merged = self._cluster_arrows(merged)
         return merged
 
     def fit_lines(self, detections: Iterable[DetectionRaw]) -> List:
@@ -145,10 +164,10 @@ class DetectionPostprocessor:
         left_width_dm = self._width_dm(left_det, w)
         right_width_dm = self._width_dm(right_det, w)
 
-        left_type = GeometryMapper._line_style_from_class(left_det.class_id) if left_det else LaneType.UNKNOWN
-        right_type = GeometryMapper._line_style_from_class(right_det.class_id) if right_det else LaneType.UNKNOWN
-        left_color = GeometryMapper._line_color_from_class(left_det.class_id) if left_det else LineColor.UNKNOWN
-        right_color = GeometryMapper._line_color_from_class(right_det.class_id) if right_det else LineColor.UNKNOWN
+        left_type = self.geometry_mapper._line_style_from_class(left_det.class_id) if left_det else LaneType.UNKNOWN
+        right_type = self.geometry_mapper._line_style_from_class(right_det.class_id) if right_det else LaneType.UNKNOWN
+        left_color = self.geometry_mapper._line_color_from_class(left_det.class_id) if left_det else LineColor.UNKNOWN
+        right_color = self.geometry_mapper._line_color_from_class(right_det.class_id) if right_det else LineColor.UNKNOWN
 
         left_boundary = (
             self.geometry_mapper.boundary_points_from_bbox(left_det, frame_shape)
@@ -230,6 +249,232 @@ class DetectionPostprocessor:
             if not placed:
                 merged.append(det)
         return merged
+
+    def _cluster_arrows(self, detections: List[DetectionRaw]) -> List[DetectionRaw]:
+        """
+        Merge arrow detections with nearby line-like masks so arrows render as a single object.
+
+        Optimized for small N: uses bbox prefilter then mask overlap on the intersecting window.
+        """
+        if not detections:
+            return []
+
+        result: List[DetectionRaw] = []
+        consumed = set()
+
+        # First, merge arrows with nearby masks
+        for idx, det in enumerate(detections):
+            if det.class_id not in self.arrow_classes or det.mask is None or idx in consumed:
+                continue
+
+            consumed.add(idx)
+            seed_mask = det.mask
+            seed_bbox = det.bbox or self._bbox_from_mask(seed_mask)
+            arrow_info = self._arrow_info(seed_mask)
+            if arrow_info is None:
+                result.append(det)
+                continue
+
+            combined_mask = seed_mask.copy()
+            combined_bbox = seed_bbox
+            max_conf = det.confidence
+
+            for j, other in enumerate(detections):
+                if j in consumed or other.mask is None:
+                    continue
+                if other.class_id not in self.arrow_classes and other.class_id not in self.arrow_absorb_classes:
+                    continue
+                if not self._should_absorb_into_arrow(seed_mask, seed_bbox, arrow_info, other):
+                    continue
+
+                combined_mask = np.maximum(combined_mask, other.mask)
+                combined_bbox = self._bbox_from_mask(combined_mask)
+                max_conf = max(max_conf, other.confidence)
+                consumed.add(j)
+
+            result.append(
+                DetectionRaw(
+                    class_id=det.class_id,
+                    confidence=max_conf,
+                    mask=combined_mask,
+                    bbox=combined_bbox,
+                    polygon=det.polygon,
+                )
+            )
+
+        # Then add everything that wasn't consumed
+        for idx, det in enumerate(detections):
+            if idx in consumed:
+                continue
+            result.append(det)
+
+        return result
+
+    def _should_absorb_into_arrow(
+        self,
+        arrow_mask: np.ndarray,
+        arrow_bbox: Optional[Tuple[int, int, int, int]],
+        arrow_info: dict,
+        other: DetectionRaw,
+    ) -> bool:
+        """
+        Decide if other detection should be merged into arrow cluster based on overlap and direction.
+        - Arrow fragments: directional gate + modest overlap.
+        - Line-like objects: stricter, require directional gate and high coverage.
+        Uses only the seed arrow geometry (arrow_info) to avoid runaway growth.
+        """
+        other_bbox = other.bbox or self._bbox_from_mask(other.mask)
+        if other_bbox is None or arrow_bbox is None or other.mask is None:
+            return False
+
+        # Avoid runaway growth: only absorb if the other mask is not disproportionately larger than the arrow seed
+        arrow_area = (arrow_mask > 0).sum()
+        other_area = (other.mask > 0).sum()
+        if arrow_area == 0 or other_area == 0:
+            return False
+        if other_area / float(arrow_area) > self.arrow_max_absorb_area_ratio:
+            return False
+
+        # Directional gate: only consider masks along the arrow axis within a corridor
+        if not self._directional_gate(arrow_info, other_bbox):
+            return False
+
+        overlap_ratio = self._mask_overlap_ratio(arrow_mask, arrow_bbox, other.mask, other_bbox)
+        bbox_iou = self._iou(arrow_bbox, other_bbox)
+
+        # Arrow-to-arrow merge: allow modest overlap
+        if other.class_id in self.arrow_classes:
+            return (bbox_iou >= self.arrow_iou_threshold) or (overlap_ratio >= self.arrow_overlap_ratio)
+
+        # Absorbing line-like objects:
+        # Primary path: strong coverage
+        if overlap_ratio >= self.arrow_absorb_overlap_ratio:
+            if self.arrow_require_center_inside and not self._is_center_inside(arrow_mask, arrow_bbox, other_bbox):
+                return False
+            return bbox_iou >= self.arrow_iou_threshold
+
+        # Secondary path: allow thin tail pieces along the arrow direction with modest overlap
+        if overlap_ratio >= self.arrow_tail_overlap_min:
+            area_ratio = other_area / float(arrow_area)
+            if area_ratio <= self.arrow_tail_area_ratio:
+                if self.arrow_require_center_inside:
+                    return self._is_center_inside(arrow_mask, arrow_bbox, other_bbox)
+                return True
+
+        return False
+
+    def _directional_gate(self, arrow_info: dict, other_bbox: Tuple[int, int, int, int]) -> bool:
+        """
+        Check if other bbox lies within a corridor along the arrow's principal direction.
+        """
+        cx_o = 0.5 * (other_bbox[0] + other_bbox[2])
+        cy_o = 0.5 * (other_bbox[1] + other_bbox[3])
+        cx_a, cy_a = arrow_info["center"]
+        dx, dy = arrow_info["direction"]
+        rel_x = cx_o - cx_a
+        rel_y = cy_o - cy_a
+
+        # Projection onto arrow direction and perpendicular distance
+        proj = abs(rel_x * dx + rel_y * dy)
+        lateral = abs(-rel_x * dy + rel_y * dx)
+
+        max_forward = max(self.arrow_forward_factor * arrow_info["length_scale"], self.arrow_min_forward_px)
+        lateral_limit = max(self.arrow_lateral_factor * arrow_info["width_scale"], self.arrow_min_lateral_px)
+
+        return proj <= max_forward and lateral <= lateral_limit
+
+    @staticmethod
+    def _is_center_inside(
+        arrow_mask: np.ndarray,
+        arrow_bbox: Optional[Tuple[int, int, int, int]],
+        other_bbox: Tuple[int, int, int, int],
+    ) -> bool:
+        if arrow_bbox is None or arrow_mask.size == 0:
+            return False
+        cx = int(round(0.5 * (other_bbox[0] + other_bbox[2])))
+        cy = int(round(0.5 * (other_bbox[1] + other_bbox[3])))
+        h, w = arrow_mask.shape
+        cx = max(0, min(w - 1, cx))
+        cy = max(0, min(h - 1, cy))
+        return arrow_mask[cy, cx] > 0
+
+    @staticmethod
+    def _arrow_info(mask: np.ndarray) -> Optional[dict]:
+        """Compute principal direction and scales for an arrow mask."""
+        ys, xs = np.nonzero(mask)
+        if len(xs) == 0:
+            return None
+        cx = float(xs.mean())
+        cy = float(ys.mean())
+        coords = np.column_stack([xs - cx, ys - cy])
+        if len(coords) < 2:
+            return None
+        cov = np.cov(coords, rowvar=False)
+        try:
+            eigvals, eigvecs = np.linalg.eigh(cov)
+        except np.linalg.LinAlgError:
+            return None
+        idx = int(np.argmax(eigvals))
+        direction = eigvecs[:, idx]
+        norm = float(np.linalg.norm(direction))
+        if norm == 0:
+            return None
+        direction = direction / norm
+        length_scale = float(np.sqrt(max(eigvals[idx], 1e-6)) * 2.0)
+        width_scale = float(np.sqrt(max(eigvals[1 - idx], 1e-6)) * 2.0)
+        return {
+            "center": (cx, cy),
+            "direction": (float(direction[0]), float(direction[1])),
+            "length_scale": length_scale,
+            "width_scale": width_scale,
+        }
+
+    @staticmethod
+    def _bbox_from_mask(mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        ys, xs = np.nonzero(mask)
+        if len(xs) == 0:
+            return None
+        return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+
+    def _mask_overlap_ratio(
+        self,
+        mask_a: np.ndarray,
+        bbox_a: Optional[Tuple[int, int, int, int]],
+        mask_b: np.ndarray,
+        bbox_b: Optional[Tuple[int, int, int, int]],
+    ) -> float:
+        """
+        Compute overlap area(mask_a ∩ mask_b) / area(mask_b) using bbox window to limit work.
+        """
+        if mask_a is None or mask_b is None:
+            return 0.0
+
+        if bbox_a is None:
+            bbox_a = self._bbox_from_mask(mask_a)
+        if bbox_b is None:
+            bbox_b = self._bbox_from_mask(mask_b)
+        if bbox_a is None or bbox_b is None:
+            return 0.0
+
+        x1 = max(bbox_a[0], bbox_b[0])
+        y1 = max(bbox_a[1], bbox_b[1])
+        x2 = min(bbox_a[2], bbox_b[2])
+        y2 = min(bbox_a[3], bbox_b[3])
+
+        if x2 < x1 or y2 < y1:
+            return 0.0
+
+        # Slice only the intersecting window to keep it cheap
+        window_a = mask_a[y1 : y2 + 1, x1 : x2 + 1]
+        window_b = mask_b[y1 : y2 + 1, x1 : x2 + 1]
+        intersection = np.logical_and(window_a > 0, window_b > 0).sum()
+        if intersection == 0:
+            return 0.0
+
+        area_b = (mask_b > 0).sum()
+        if area_b == 0:
+            return 0.0
+        return float(intersection) / float(area_b)
 
     @staticmethod
     def _merge_detections(a: DetectionRaw, b: DetectionRaw) -> DetectionRaw:

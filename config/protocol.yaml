@@ -20,7 +20,7 @@ sequence:
 message_sizes:
   marking_object: 13  # Size of one MarkingObject in basic frame
   marking_object_ex: 15  # Size of one MarkingObject in extended frame
-  fitted_line: 23  # Size of one FittedLine in polynomial frame
+  fitted_line: 22  # Size of one FittedLine in polynomial frame (matches <BBBBfffhhBB)
 
 # Frame overhead (bytes)
 frame_overhead:

@@ -34,3 +34,20 @@ line_styles:
   solid_classes: [4, 5, 6]  # Solid single lines
   double_classes: [7, 8]  # Double lines
   dashed_classes: [9, 10]  # Dashed lines
+
+# Arrow clustering (merge fragmented arrow masks and overlapping line-like masks)
+arrow_clustering:
+  enabled: true
+  arrow_classes: [11, 12, 13, 14, 15]
+  absorb_classes: [4, 5, 6, 7, 8, 9, 10]
+  iou_threshold: 0.15  # Minimum bbox IoU to consider merging
+  overlap_ratio_threshold: 0.25  # Arrow-to-arrow overlap fraction
+  absorb_overlap_ratio: 0.6  # Arrow coverage required over line-like mask to absorb
+  require_center_inside: true  # Only absorb if other mask center lies inside the arrow mask
+  max_absorb_area_ratio: 1.2  # Do not absorb masks much larger than the arrow seed
+  forward_factor: 3.0  # Corridor length factor along arrow direction
+  lateral_factor: 1.0  # Corridor half-width factor perpendicular to arrow
+  min_forward_px: 20  # Minimum forward search distance (pixels)
+  min_lateral_px: 10  # Minimum lateral corridor (pixels)
+  tail_overlap_min: 0.1  # Minimal overlap to absorb thin tail pieces
+  tail_area_ratio: 3.0  # Allow tails up to this area ratio vs arrow seed
