@@ -1,0 +1,39 @@
+# Video Capture Configuration
+# GStreamer-based RTSP/UDP capture parameters
+
+# RTSP/Stream settings
+stream:
+  uri: rtsp://239.0.0.1:5000  # RTSP URI or UDP/RTP address
+  latency_ms: 100  # Latency in milliseconds
+  drop_old_frames: true  # Drop old frames to maintain low latency
+  enabled: true
+
+# Frame queue
+queue:
+  max_size: 2  # Maximum number of frames in queue
+
+# Pipeline settings
+pipeline:
+  custom: ''  # Custom GStreamer pipeline (leave empty for auto-detection)
+
+  # RTSP pipeline parameters
+  rtsp:
+    max_buffers: 2  # Maximum buffers in appsink
+    drop: true  # Drop old buffers
+    sync: false  # Don't sync to clock
+
+  # UDP pipeline parameters
+  udp:
+    auto_multicast: true  # Auto-detect multicast
+    max_buffers: 2
+    drop: true
+    sync: false
+
+# Buffer processing
+buffer:
+  # For handling stride/padding in video frames
+  expected_channels: 3  # RGB channels
+
+# Thread management
+thread:
+  stop_timeout: 2  # Timeout in seconds for stopping thread

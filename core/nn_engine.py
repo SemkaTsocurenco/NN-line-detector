@@ -2,26 +2,55 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import cv2
+import yaml
 
 from core.detections import DetectionRaw
 
 logger = logging.getLogger(__name__)
 
 
+def load_nn_engine_config(config_path: str = "config/nn_engine.yaml") -> Dict[str, Any]:
+    """Load neural network engine configuration from YAML file."""
+    path = Path(config_path)
+    if not path.exists():
+        logger.warning("NN engine config not found at %s, using defaults", config_path)
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
 class NNEngine:
     """Adapter around the NN described in use_NN.md (segmentation)."""
 
-    def __init__(self, model_path: str, device: str = "cpu", input_size: tuple[int, int] | None = None):
+    def __init__(self, model_path: str, device: str = "cpu", input_size: tuple[int, int] | None = None, config: Optional[Dict[str, Any]] = None):
+        if config is None:
+            config = {}
+
+        model_cfg = config.get("model", {})
+        input_cfg = config.get("input", {})
+        output_cfg = config.get("output", {})
+        norm_cfg = input_cfg.get("normalization", {})
+        cuda_cfg = config.get("cuda", {})
+
         self.model_path = Path(model_path)
         self.device = self._resolve_device(device)
         self.input_size = input_size
         self.model: Optional[torch.nn.Module] = None
+
+        # Config values
+        self.normalization_scale = norm_cfg.get("scale", 255.0)
+        self.mean = np.array(norm_cfg.get("mean", [0.485, 0.456, 0.406]), dtype=np.float32)
+        self.std = np.array(norm_cfg.get("std", [0.229, 0.224, 0.225]), dtype=np.float32)
+        self.background_class_id = output_cfg.get("background_class_id", 0)
+        self.min_area = output_cfg.get("min_area", 0)
+        self.use_fp16 = cuda_cfg.get("use_fp16", True)
+
         self._load_model()
 
     @staticmethod
@@ -54,7 +83,7 @@ class NNEngine:
                 return
         if self.model:
             self.model.to(self.device)
-            if self.device.startswith("cuda"):
+            if self.device.startswith("cuda") and self.use_fp16:
                 try:
                     self.model.half()
                     logger.info("Using FP16 on CUDA for faster inference")
@@ -95,11 +124,11 @@ class NNEngine:
 
         detections: List[DetectionRaw] = []
         for class_id in np.unique(class_np):
-            if class_id == 0:
+            if class_id == self.background_class_id:
                 continue  # background
             mask = (class_np == class_id)
             area = int(mask.sum())
-            if area == 0:
+            if area < self.min_area:
                 continue
             ys, xs = np.nonzero(mask)
             x1, x2 = xs.min(), xs.max()
@@ -120,10 +149,8 @@ class NNEngine:
         if self.input_size:
             w, h = self.input_size
             img = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
-        img = img.astype(np.float32) / 255.0
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        img = (img - mean) / std
+        img = img.astype(np.float32) / self.normalization_scale
+        img = (img - self.mean) / self.std
         img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
         tensor = torch.from_numpy(img).unsqueeze(0).to(self.device)
         return tensor

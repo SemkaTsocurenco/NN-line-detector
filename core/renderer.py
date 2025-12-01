@@ -1,29 +1,130 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import yaml
 
 from core.detections import DetectionRaw, LaneSummary, LineColor, LaneType
 
 logger = logging.getLogger(__name__)
 
 
+def load_renderer_config(config_path: str = "config/renderer.yaml") -> Dict[str, Any]:
+    """Load renderer configuration from YAML file."""
+    path = Path(config_path)
+    if not path.exists():
+        logger.warning("Renderer config not found at %s, using defaults", config_path)
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
 class Renderer:
-    def __init__(self, class_names: Optional[Dict[int, str]] = None) -> None:
+    def __init__(self, class_names: Optional[Dict[int, str]] = None, config: Optional[Dict[str, Any]] = None) -> None:
         self.class_names = class_names or {}
         self._color_cache: Dict[int, tuple[int, int, int]] = {}
+
+        # Load configuration
+        if config is None:
+            config = load_renderer_config()
+
+        # Load all config sections
+        mask_cfg = config.get("mask", {})
+        overlap_cfg = config.get("overlap", {})
+        line_cfg = config.get("line", {})
+        arrow_cfg = config.get("arrow", {})
+        crosswalk_cfg = config.get("crosswalk", {})
+        stop_line_cfg = config.get("stop_line", {})
+        box_junction_cfg = config.get("box_junction", {})
+        channelizing_cfg = config.get("channelizing", {})
+        icon_cfg = config.get("icon", {})
+        priority_cfg = config.get("priority", {})
+        class_groups_cfg = config.get("class_groups", {})
+        line_colors_cfg = config.get("line_colors", {})
+
+        # Mask parameters
+        self.mask_binarization_threshold = mask_cfg.get("binarization_threshold", 127)
+        self.mask_overlay_alpha = mask_cfg.get("overlay_alpha", 0.4)
+        self.mask_contour_outline_thickness = mask_cfg.get("contour_outline_thickness", 3)
+        self.mask_contour_color_thickness = mask_cfg.get("contour_color_thickness", 2)
+
+        # Overlap parameters
+        self.overlap_threshold = overlap_cfg.get("threshold", 0.7)
+        self.line_detection_threshold = overlap_cfg.get("line_detection_threshold", 0.4)
+
+        # Line parameters
+        self.line_sample_points_min = line_cfg.get("sample_points_min", 50)
+        self.line_thickness = line_cfg.get("thickness", 6)
+        self.line_outline_offset = line_cfg.get("outline_offset", 2)
+        self.dash_length = line_cfg.get("dash_length", 20)
+        self.gap_length = line_cfg.get("gap_length", 10)
+        self.double_offset = line_cfg.get("double_offset", 6)
+
+        # Arrow parameters
+        self.arrow_min_mask_area = arrow_cfg.get("min_mask_area", 25)
+        self.arrow_min_contour_area = arrow_cfg.get("min_contour_area", 20)
+        self.arrow_min_box_width = arrow_cfg.get("min_box_width", 3)
+        self.arrow_min_box_height = arrow_cfg.get("min_box_height", 3)
+        self.arrow_template_size = arrow_cfg.get("template_size", 200)
+        self.arrow_thickness = arrow_cfg.get("thickness", 22)
+        self.arrow_outline_thickness = arrow_cfg.get("outline_thickness", 28)
+        self.arrow_tip_size = arrow_cfg.get("tip_size", 45)
+        self.arrow_combined_thickness = arrow_cfg.get("combined_thickness", 15)
+        self.arrow_combined_outline = arrow_cfg.get("combined_outline", 21)
+        self.arrow_combined_tip_size = arrow_cfg.get("combined_tip_size", 35)
+        self.arrow_alpha = arrow_cfg.get("alpha", 0.9)
+
+        # Crosswalk parameters
+        self.crosswalk_template_size = crosswalk_cfg.get("template_size", 200)
+        self.crosswalk_num_stripes = crosswalk_cfg.get("num_stripes", 8)
+        self.crosswalk_alpha = crosswalk_cfg.get("alpha", 0.9)
+
+        # Stop line parameters
+        self.stop_line_outline_thickness = stop_line_cfg.get("outline_thickness", 12)
+        self.stop_line_line_thickness = stop_line_cfg.get("line_thickness", 8)
+
+        # Box junction parameters
+        self.box_junction_template_size = box_junction_cfg.get("template_size", 200)
+        self.box_junction_line_thickness = box_junction_cfg.get("line_thickness", 7)
+        self.box_junction_line_spacing = box_junction_cfg.get("line_spacing", 25)
+        self.box_junction_alpha = box_junction_cfg.get("alpha", 0.85)
+
+        # Channelizing parameters
+        self.channelizing_alpha = channelizing_cfg.get("alpha", 0.85)
+
+        # Icon parameters
+        self.icon_outline_offset = icon_cfg.get("outline_offset", 2)
+        self.icon_base_thickness = icon_cfg.get("base_thickness", 3)
+
+        # Priority levels
+        self.priority_lines = priority_cfg.get("lines", 1)
+        self.priority_surface_marks = priority_cfg.get("surface_marks", 2)
+        self.priority_stop_cross = priority_cfg.get("stop_cross", 3)
+        self.priority_arrows_icons = priority_cfg.get("arrows_icons", 4)
+
+        # Class groups
+        self.class_group_lines = set(class_groups_cfg.get("lines", [4, 5, 6, 7, 8, 9, 10]))
+        self.class_group_surface_marks = set(class_groups_cfg.get("surface_marks", [1, 16]))
+        self.class_group_stop_cross = set(class_groups_cfg.get("stop_cross", [2, 3]))
+        self.class_group_arrows_icons = set(class_groups_cfg.get("arrows_icons", [11, 12, 13, 14, 15, 22, 23]))
 
         # Define colors for lane markings (BGR format for OpenCV)
         # Using bright, saturated colors for visibility
         self.line_colors = {
-            LineColor.WHITE: (255, 255, 255),  # White
-            LineColor.YELLOW: (0, 255, 255),   # Bright Yellow (BGR)
-            LineColor.RED: (0, 0, 255),         # Bright Red
-            LineColor.UNKNOWN: (200, 200, 200), # Light gray
+            LineColor.WHITE: tuple(line_colors_cfg.get("white", [255, 255, 255])),
+            LineColor.YELLOW: tuple(line_colors_cfg.get("yellow", [0, 255, 255])),
+            LineColor.RED: tuple(line_colors_cfg.get("red", [0, 0, 255])),
+            LineColor.UNKNOWN: tuple(line_colors_cfg.get("unknown", [200, 200, 200])),
         }
+
+        # Arrow and icon colors
+        self.arrow_color = tuple(config.get("arrow_color", [0, 255, 255]))
+        self.icon_color = tuple(config.get("icon_color", [0, 255, 255]))
+        self.outline_color = tuple(config.get("outline_color", [0, 0, 0]))
 
     def render(
         self,
@@ -60,13 +161,13 @@ class Renderer:
         arrows_icons = []
 
         for det in filtered_dets:
-            if det.class_id in {4, 5, 6, 7, 8, 9, 10}:  # Lines
+            if det.class_id in self.class_group_lines:  # Lines
                 lines.append(det)
-            elif det.class_id in {1, 16}:  # Box junction, channelizing
+            elif det.class_id in self.class_group_surface_marks:  # Box junction, channelizing
                 surface_marks.append(det)
-            elif det.class_id in {2, 3}:  # Crosswalk, stop line
+            elif det.class_id in self.class_group_stop_cross:  # Crosswalk, stop line
                 stop_cross.append(det)
-            elif det.class_id in {11, 12, 13, 14, 15, 22, 23}:  # Arrows, icons
+            elif det.class_id in self.class_group_arrows_icons:  # Arrows, icons
                 arrows_icons.append(det)
 
         # Draw in priority order (lowest to highest)
@@ -131,48 +232,41 @@ class Renderer:
         color = self._color_for_class(det.class_id)
 
         # Convert mask to binary
-        mask = (det.mask > 127).astype(np.uint8)
+        mask = (det.mask > self.mask_binarization_threshold).astype(np.uint8)
 
         # Create colored overlay
         overlay = img.copy()
         overlay[mask > 0] = color
 
         # Blend with original image (semi-transparent)
-        alpha = 0.4  # Transparency level
-        cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+        cv2.addWeighted(overlay, self.mask_overlay_alpha, img, 1 - self.mask_overlay_alpha, 0, img)
 
         # Draw mask contour for better visibility
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
             # Draw black outline first
-            cv2.drawContours(img, contours, -1, (0, 0, 0), 3)
+            cv2.drawContours(img, contours, -1, (0, 0, 0), self.mask_contour_outline_thickness)
             # Draw colored contour on top
-            cv2.drawContours(img, contours, -1, color, 2)
+            cv2.drawContours(img, contours, -1, color, self.mask_contour_color_thickness)
 
-    @staticmethod
-    def _get_detection_priority(class_id: int) -> int:
+    def _get_detection_priority(self, class_id: int) -> int:
         """
         Get priority for class ID. Higher number = higher priority (drawn last).
 
-        Priority levels:
-        1: Lines (can be covered by everything)
-        2: Surface markings (box junction, channelizing)
-        3: Stop lines and crosswalks
-        4: Arrows and icons (highest priority)
+        Priority levels are loaded from config.
         """
-        if class_id in {4, 5, 6, 7, 8, 9, 10}:  # Lines
-            return 1
-        elif class_id in {1, 16}:  # Box junction, channelizing
-            return 2
-        elif class_id in {2, 3}:  # Crosswalk, stop line
-            return 3
-        elif class_id in {11, 12, 13, 14, 15, 22, 23}:  # Arrows, icons
-            return 4
+        if class_id in self.class_group_lines:  # Lines
+            return self.priority_lines
+        elif class_id in self.class_group_surface_marks:  # Box junction, channelizing
+            return self.priority_surface_marks
+        elif class_id in self.class_group_stop_cross:  # Crosswalk, stop line
+            return self.priority_stop_cross
+        elif class_id in self.class_group_arrows_icons:  # Arrows, icons
+            return self.priority_arrows_icons
         else:
             return 0  # Unknown
 
-    @staticmethod
-    def _masks_overlap(det1: DetectionRaw, det2: DetectionRaw, threshold: float = 0.3) -> bool:
+    def _masks_overlap(self, det1: DetectionRaw, det2: DetectionRaw, threshold: Optional[float] = None) -> bool:
         """
         Check if two detection masks overlap significantly.
 
@@ -183,12 +277,15 @@ class Renderer:
         Returns:
             True if masks overlap more than threshold
         """
+        if threshold is None:
+            threshold = self.overlap_threshold
+
         if det1.mask is None or det2.mask is None:
             return False
 
         # Convert masks to binary
-        mask1 = (det1.mask > 127).astype(np.uint8)
-        mask2 = (det2.mask > 127).astype(np.uint8)
+        mask1 = (det1.mask > self.mask_binarization_threshold).astype(np.uint8)
+        mask2 = (det2.mask > self.mask_binarization_threshold).astype(np.uint8)
 
         # Calculate intersection and union
         intersection = np.sum(mask1 & mask2)
@@ -231,7 +328,7 @@ class Renderer:
             for accepted in filtered:
                 # Only filter if overlapped by HIGHER priority
                 if self._get_detection_priority(accepted.class_id) > self._get_detection_priority(det.class_id):
-                    if self._masks_overlap(det, accepted, threshold=0.7):  # Increased threshold to 70%
+                    if self._masks_overlap(det, accepted, threshold=self.overlap_threshold):
                         is_overlapped = True
                         logger.debug(f"Filtering class {det.class_id} overlapped by class {accepted.class_id}")
                         break
@@ -243,8 +340,7 @@ class Renderer:
 
         return filtered
 
-    @staticmethod
-    def _line_overlaps_detection(fitted_line, detection: DetectionRaw, threshold: float = 0.3) -> bool:
+    def _line_overlaps_detection(self, fitted_line, detection: DetectionRaw, threshold: Optional[float] = None) -> bool:
         """
         Check if a fitted line overlaps with a detection mask.
 
@@ -256,6 +352,9 @@ class Renderer:
         Returns:
             True if line passes through the detection mask
         """
+        if threshold is None:
+            threshold = self.line_detection_threshold
+
         if detection.mask is None:
             return False
 
@@ -267,12 +366,12 @@ class Renderer:
             return False
 
         # Sample points along the line
-        num_points = max(abs(y_end - y_start), 50)
+        num_points = max(abs(y_end - y_start), self.line_sample_points_min)
         y_values = np.linspace(y_start, y_end, num_points)
         x_values = np.polyval(fitted_line.poly_coeffs, y_values)
 
         # Check how many line points fall inside the detection mask
-        mask = (detection.mask > 127).astype(np.uint8)
+        mask = (detection.mask > self.mask_binarization_threshold).astype(np.uint8)
         h, w = mask.shape
 
         points_in_mask = 0
@@ -310,7 +409,7 @@ class Renderer:
             # Check if this line is overlapped by any detection
             is_overlapped = False
             for det in detections:
-                if self._line_overlaps_detection(line, det, threshold=0.4):
+                if self._line_overlaps_detection(line, det):
                     is_overlapped = True
                     break
 
@@ -343,7 +442,7 @@ class Renderer:
             return  # Degenerate line
 
         # Sample points along y-axis (since x = f(y))
-        num_points = max(abs(y_end - y_start), 50)
+        num_points = max(abs(y_end - y_start), self.line_sample_points_min)
         y_values = np.linspace(y_start, y_end, num_points)
         x_values = np.polyval(fitted_line.poly_coeffs, y_values)
 
@@ -359,21 +458,20 @@ class Renderer:
             return
 
         # Draw based on line style with black outline for visibility
-        thickness = 6  # Increased thickness for better visibility
         if line_style == LaneType.SOLID:
-            self._draw_solid_line(img, points, bgr_color, thickness=thickness)
+            self._draw_solid_line(img, points, bgr_color, thickness=self.line_thickness)
         elif line_style == LaneType.DASHED:
-            self._draw_dashed_line(img, points, bgr_color, thickness=thickness)
+            self._draw_dashed_line(img, points, bgr_color, thickness=self.line_thickness)
         elif line_style == LaneType.DOUBLE:
-            self._draw_double_line(img, points, bgr_color, thickness=thickness)
+            self._draw_double_line(img, points, bgr_color, thickness=self.line_thickness)
         else:
             # Default: solid line
-            self._draw_solid_line(img, points, bgr_color, thickness=thickness)
+            self._draw_solid_line(img, points, bgr_color, thickness=self.line_thickness)
 
-    def _draw_solid_line(self, img: np.ndarray, points: np.ndarray, color: Tuple[int, int, int], thickness: int = 4) -> None:
+    def _draw_solid_line(self, img: np.ndarray, points: np.ndarray, color: Tuple[int, int, int], thickness: int) -> None:
         """Draw a solid line through points with black outline."""
         # Draw black outline first (thicker)
-        cv2.polylines(img, [points], isClosed=False, color=(0, 0, 0), thickness=thickness + 2, lineType=cv2.LINE_AA)
+        cv2.polylines(img, [points], isClosed=False, color=(0, 0, 0), thickness=thickness + self.line_outline_offset, lineType=cv2.LINE_AA)
         # Draw colored line on top
         cv2.polylines(img, [points], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
 
@@ -382,11 +480,16 @@ class Renderer:
         img: np.ndarray,
         points: np.ndarray,
         color: Tuple[int, int, int],
-        thickness: int = 4,
-        dash_length: int = 20,
-        gap_length: int = 10,
+        thickness: int,
+        dash_length: Optional[int] = None,
+        gap_length: Optional[int] = None,
     ) -> None:
         """Draw a dashed line through points."""
+        if dash_length is None:
+            dash_length = self.dash_length
+        if gap_length is None:
+            gap_length = self.gap_length
+
         if len(points) < 2:
             return
 
@@ -420,7 +523,7 @@ class Renderer:
 
             if is_dash and start_pt is not None and end_pt is not None:
                 # Draw black outline first
-                cv2.line(img, tuple(start_pt), tuple(end_pt), (0, 0, 0), thickness + 2, lineType=cv2.LINE_AA)
+                cv2.line(img, tuple(start_pt), tuple(end_pt), (0, 0, 0), thickness + self.line_outline_offset, lineType=cv2.LINE_AA)
                 # Draw colored dash on top
                 cv2.line(img, tuple(start_pt), tuple(end_pt), color, thickness, lineType=cv2.LINE_AA)
 
@@ -432,10 +535,13 @@ class Renderer:
         img: np.ndarray,
         points: np.ndarray,
         color: Tuple[int, int, int],
-        thickness: int = 4,
-        offset: int = 6,
+        thickness: int,
+        offset: Optional[int] = None,
     ) -> None:
         """Draw a double solid line through points."""
+        if offset is None:
+            offset = self.double_offset
+
         if len(points) < 2:
             return
 
@@ -483,8 +589,8 @@ class Renderer:
             line_thickness = thickness // 2
 
             # Draw black outlines first
-            cv2.polylines(img, [left_arr], isClosed=False, color=(0, 0, 0), thickness=line_thickness + 2, lineType=cv2.LINE_AA)
-            cv2.polylines(img, [right_arr], isClosed=False, color=(0, 0, 0), thickness=line_thickness + 2, lineType=cv2.LINE_AA)
+            cv2.polylines(img, [left_arr], isClosed=False, color=(0, 0, 0), thickness=line_thickness + self.line_outline_offset, lineType=cv2.LINE_AA)
+            cv2.polylines(img, [right_arr], isClosed=False, color=(0, 0, 0), thickness=line_thickness + self.line_outline_offset, lineType=cv2.LINE_AA)
 
             # Draw colored lines on top
             cv2.polylines(img, [left_arr], isClosed=False, color=color, thickness=line_thickness, lineType=cv2.LINE_AA)
@@ -537,11 +643,11 @@ class Renderer:
         arrow_type = self._get_arrow_type(det.class_id)
 
         # Extract mask contour for perspective
-        mask = (det.mask > 127).astype(np.uint8) * 255
+        mask = (det.mask > self.mask_binarization_threshold).astype(np.uint8) * 255
 
-        # Check if mask has enough pixels (reduced threshold for distant arrows)
+        # Check if mask has enough pixels
         mask_area = np.sum(mask > 0)
-        if mask_area < 25:  # Reduced from 100 to 25 for distant arrows
+        if mask_area < self.arrow_min_mask_area:
             logger.debug(f"Arrow mask too small: {mask_area} pixels, class_id={det.class_id}")
             return
 
@@ -555,7 +661,7 @@ class Renderer:
         contour = max(contours, key=cv2.contourArea)
         contour_area = cv2.contourArea(contour)
 
-        if contour_area < 20:  # Reduced from 50 to 20 for distant arrows
+        if contour_area < self.arrow_min_contour_area:
             logger.debug(f"Arrow contour too small: {contour_area}, class_id={det.class_id}")
             return
 
@@ -564,11 +670,11 @@ class Renderer:
         box = cv2.boxPoints(rect)
         box = np.int32(box)
 
-        # Check if box is degenerate (reduced minimum size)
+        # Check if box is degenerate
         box_width = np.linalg.norm(box[0] - box[1])
         box_height = np.linalg.norm(box[1] - box[2])
 
-        if box_width < 3 or box_height < 3:  # Reduced from 5 to 3 for distant arrows
+        if box_width < self.arrow_min_box_width or box_height < self.arrow_min_box_height:
             logger.debug(f"Arrow box too small: {box_width:.1f}x{box_height:.1f}, class_id={det.class_id}")
             return
 
@@ -600,17 +706,19 @@ class Renderer:
         }
         return arrow_types.get(class_id, "straight")
 
-    @staticmethod
-    def _create_arrow_template(arrow_type: str, size: int = 200) -> np.ndarray:
+    def _create_arrow_template(self, arrow_type: str, size: Optional[int] = None) -> np.ndarray:
         """Create arrow template image with bright color and black outline."""
+        if size is None:
+            size = self.arrow_template_size
+
         img = np.zeros((size, size, 4), dtype=np.uint8)  # RGBA
 
         # Use bright cyan/green color for better visibility
-        color = (0, 255, 255, 255)  # Bright cyan (BGR + Alpha)
-        outline_color = (0, 0, 0, 255)  # Black outline
-        thickness = 22
-        outline_thickness = 28  # Thicker for outline
-        tip_size = 45
+        color = tuple(list(self.arrow_color) + [255])  # Add alpha
+        outline_color = tuple(list(self.outline_color) + [255])  # Add alpha
+        thickness = self.arrow_thickness
+        outline_thickness = self.arrow_outline_thickness
+        tip_size = self.arrow_tip_size
 
         center_x, center_y = size // 2, size // 2
 
@@ -673,9 +781,9 @@ class Renderer:
 
         elif arrow_type == "left_straight":
             # Combined left and straight with outlines
-            comb_thick = thickness - 7
-            comb_outline = outline_thickness - 7
-            tip_s = 35
+            comb_thick = self.arrow_combined_thickness
+            comb_outline = self.arrow_combined_outline
+            tip_s = self.arrow_combined_tip_size
 
             # Straight arrow - outline
             cv2.line(img, (center_x + 30, size - 40), (center_x + 30, 40), outline_color, comb_outline)
@@ -714,9 +822,9 @@ class Renderer:
 
         elif arrow_type == "right_straight":
             # Combined right and straight with outlines
-            comb_thick = thickness - 7
-            comb_outline = outline_thickness - 7
-            tip_s = 35
+            comb_thick = self.arrow_combined_thickness
+            comb_outline = self.arrow_combined_outline
+            tip_s = self.arrow_combined_tip_size
 
             # Straight arrow - outline
             cv2.line(img, (center_x - 30, size - 40), (center_x - 30, 40), outline_color, comb_outline)
@@ -771,9 +879,11 @@ class Renderer:
 
         return np.array([top_points[0], top_points[1], bottom_points[1], bottom_points[0]], dtype=np.float32)
 
-    @staticmethod
-    def _warp_and_draw(img: np.ndarray, overlay: np.ndarray, dst_points: np.ndarray, alpha: float = 0.9) -> None:
+    def _warp_and_draw(self, img: np.ndarray, overlay: np.ndarray, dst_points: np.ndarray, alpha: Optional[float] = None) -> None:
         """Warp overlay image to fit dst_points and blend with img."""
+        if alpha is None:
+            alpha = self.arrow_alpha
+
         h, w = overlay.shape[:2]
 
         # Source points (corners of overlay)
@@ -809,7 +919,7 @@ class Renderer:
             return
 
         # Get mask contour
-        mask = (det.mask > 127).astype(np.uint8) * 255
+        mask = (det.mask > self.mask_binarization_threshold).astype(np.uint8) * 255
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
@@ -825,16 +935,18 @@ class Renderer:
         crosswalk_img = self._create_crosswalk_template()
 
         # Warp and draw with higher opacity
-        self._warp_and_draw(img, crosswalk_img, box_sorted, alpha=0.9)
+        self._warp_and_draw(img, crosswalk_img, box_sorted, alpha=self.crosswalk_alpha)
 
-    @staticmethod
-    def _create_crosswalk_template(size: int = 200) -> np.ndarray:
+    def _create_crosswalk_template(self, size: Optional[int] = None) -> np.ndarray:
         """Create crosswalk template with stripes."""
+        if size is None:
+            size = self.crosswalk_template_size
+
         img = np.zeros((size, size, 4), dtype=np.uint8)
         color = (255, 255, 255, 255)  # White
 
         # Draw vertical stripes
-        num_stripes = 8
+        num_stripes = self.crosswalk_num_stripes
         stripe_width = size // (num_stripes * 2)
 
         for i in range(num_stripes):
@@ -849,7 +961,7 @@ class Renderer:
             return
 
         # Get mask contour
-        mask = (det.mask > 127).astype(np.uint8) * 255
+        mask = (det.mask > self.mask_binarization_threshold).astype(np.uint8) * 255
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
@@ -861,16 +973,16 @@ class Renderer:
         box = np.int32(box)
 
         # Draw black outline first
-        cv2.drawContours(img, [box], 0, (0, 0, 0), 12)
+        cv2.drawContours(img, [box], 0, (0, 0, 0), self.stop_line_outline_thickness)
         # Draw bright white line on top
-        cv2.drawContours(img, [box], 0, (255, 255, 255), 8)
+        cv2.drawContours(img, [box], 0, (255, 255, 255), self.stop_line_line_thickness)
 
     def _draw_box_junction(self, img: np.ndarray, det: DetectionRaw) -> None:
         """Draw box junction (grid pattern)."""
         if det.mask is None:
             return
 
-        mask = (det.mask > 127).astype(np.uint8) * 255
+        mask = (det.mask > self.mask_binarization_threshold).astype(np.uint8) * 255
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
@@ -883,16 +995,18 @@ class Renderer:
 
         # Create box junction template (diagonal lines)
         junction_img = self._create_box_junction_template()
-        self._warp_and_draw(img, junction_img, box_sorted, alpha=0.85)
+        self._warp_and_draw(img, junction_img, box_sorted, alpha=self.box_junction_alpha)
 
-    @staticmethod
-    def _create_box_junction_template(size: int = 200) -> np.ndarray:
+    def _create_box_junction_template(self, size: Optional[int] = None) -> np.ndarray:
         """Create box junction template with diagonal grid and bright colors."""
+        if size is None:
+            size = self.box_junction_template_size
+
         img = np.zeros((size, size, 4), dtype=np.uint8)
         color = (0, 255, 255, 255)  # Bright yellow (BGR)
 
-        thickness = 7  # Increased thickness
-        spacing = 25
+        thickness = self.box_junction_line_thickness
+        spacing = self.box_junction_line_spacing
 
         # Draw diagonal lines (both directions)
         for offset in range(-size, size * 2, spacing):
@@ -908,14 +1022,13 @@ class Renderer:
         if det.mask is None:
             return
 
-        mask = (det.mask > 127).astype(np.uint8) * 255
+        mask = (det.mask > self.mask_binarization_threshold).astype(np.uint8) * 255
         # Draw mask with bright yellow color
         colored_mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         colored_mask[mask > 0] = [0, 255, 255]  # Bright yellow (BGR)
 
         # Blend with higher opacity
-        alpha = 0.85
-        mask_f = (mask.astype(np.float32) / 255.0) * alpha
+        mask_f = (mask.astype(np.float32) / 255.0) * self.channelizing_alpha
         for c in range(3):
             img[:, :, c] = img[:, :, c] * (1 - mask_f) + colored_mask[:, :, c] * mask_f
 
@@ -929,18 +1042,19 @@ class Renderer:
         center_y = (y1 + y2) // 2
         size = min(x2 - x1, y2 - y1)
 
-        # Use bright cyan color for visibility
-        icon_color = (0, 255, 255)  # Bright cyan (BGR)
-        outline_color = (0, 0, 0)  # Black outline
-        thickness = 3
+        # Use config colors
+        icon_color = self.icon_color
+        outline_color = self.outline_color
+        thickness = self.icon_base_thickness
 
         if det.class_id == 22:  # motor_icon
             # Draw simple car shape with outline
+            outline_thick = thickness + self.icon_outline_offset
             # Outline
             cv2.rectangle(img, (center_x - size // 3, center_y - size // 4),
-                         (center_x + size // 3, center_y + size // 4), outline_color, thickness + 2)
-            cv2.circle(img, (center_x - size // 4, center_y + size // 4), size // 10, outline_color, thickness + 2)
-            cv2.circle(img, (center_x + size // 4, center_y + size // 4), size // 10, outline_color, thickness + 2)
+                         (center_x + size // 3, center_y + size // 4), outline_color, outline_thick)
+            cv2.circle(img, (center_x - size // 4, center_y + size // 4), size // 10, outline_color, outline_thick)
+            cv2.circle(img, (center_x + size // 4, center_y + size // 4), size // 10, outline_color, outline_thick)
             # Icon
             cv2.rectangle(img, (center_x - size // 3, center_y - size // 4),
                          (center_x + size // 3, center_y + size // 4), icon_color, thickness)
@@ -949,10 +1063,11 @@ class Renderer:
 
         elif det.class_id == 23:  # bike_icon
             # Draw simple bike shape with outline
+            outline_thick = thickness + self.icon_outline_offset
             # Outline
-            cv2.circle(img, (center_x - size // 4, center_y), size // 8, outline_color, thickness + 2)
-            cv2.circle(img, (center_x + size // 4, center_y), size // 8, outline_color, thickness + 2)
-            cv2.line(img, (center_x - size // 4, center_y), (center_x + size // 4, center_y), outline_color, thickness + 2)
+            cv2.circle(img, (center_x - size // 4, center_y), size // 8, outline_color, outline_thick)
+            cv2.circle(img, (center_x + size // 4, center_y), size // 8, outline_color, outline_thick)
+            cv2.line(img, (center_x - size // 4, center_y), (center_x + size // 4, center_y), outline_color, outline_thick)
             # Icon
             cv2.circle(img, (center_x - size // 4, center_y), size // 8, icon_color, thickness)
             cv2.circle(img, (center_x + size // 4, center_y), size // 8, icon_color, thickness)

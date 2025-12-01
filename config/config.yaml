@@ -1,9 +1,23 @@
+# Main Configuration File
+# This file contains references to specialized configs and basic settings
+
+# Specialized configuration files (loaded by respective modules)
+# - config/line_fitting.yaml: RANSAC line fitting parameters
+# - config/postprocess.yaml: Detection postprocessing and geometry mapping
+# - config/renderer.yaml: Visual rendering parameters
+# - config/nn_engine.yaml: Neural network engine settings
+# - config/protocol.yaml: TCP protocol parameters
+# - config/video_capture.yaml: Video capture settings
+
+# RTSP/Video settings (see also: config/video_capture.yaml)
 rtsp:
   uri: rtsp://239.0.0.1:5000
   latency_ms: 100
   drop_old_frames: true
   gst_pipeline: ''
   enabled: true
+
+# Neural Network settings (see also: config/nn_engine.yaml)
 nn:
   model_path: NN/model_traced.pt
   device: cpu
@@ -37,10 +51,14 @@ nn:
     '22': motor_icon
     '23': bike_icon
     '24': parking_lot
+
+# Postprocessing (see also: config/postprocess.yaml)
 postprocess:
-  confidence_threshold: 0.7099999999999997
+  confidence_threshold: 0.71
   min_area: 150.0
   merge_iou_threshold: 0.5
+
+# Line fitting (see also: config/line_fitting.yaml)
 line_fitting:
   enabled: true
   split_by_center: true
@@ -50,11 +68,15 @@ line_fitting:
   min_inlier_ratio: 0.3
   min_points: 20
   split_margin: 20
+
+# TCP communication (see also: config/protocol.yaml)
 tcp:
   host: 127.0.0.1
   port: 9000
   reconnect_delay_s: 2.0
   drop_if_disconnected: true
+
+# Camera calibration
 camera:
   calibration:
     fx: 12.0
@@ -63,9 +85,13 @@ camera:
     cy: 0.0
     height_m: 1.0
     pitch_deg: 0.0
+
+# Logging
 logging:
   level: INFO
   log_file: ''
+
+# Rendering (see also: config/renderer.yaml)
 render:
   enabled: true
   show_masks: true

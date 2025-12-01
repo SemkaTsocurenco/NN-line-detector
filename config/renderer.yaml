@@ -1,0 +1,101 @@
+# Rendering Configuration
+# Visual rendering parameters for overlaying detections on frames
+
+# Mask rendering
+mask:
+  binarization_threshold: 127  # Threshold for converting mask to binary (0-255)
+  overlay_alpha: 0.4  # Transparency level for mask overlay (0.0-1.0)
+  contour_outline_thickness: 3  # Thickness of black outline around contours
+  contour_color_thickness: 2  # Thickness of colored contour
+
+# Detection filtering by overlap
+overlap:
+  threshold: 0.7  # Overlap ratio threshold (0.0-1.0)
+  line_detection_threshold: 0.4  # Threshold for line-detection overlap
+
+# Line rendering
+line:
+  # General line parameters
+  sample_points_min: 50  # Minimum number of points to sample along line
+  thickness: 6  # Line thickness in pixels
+  outline_offset: 2  # Outline thickness offset (added to base thickness)
+
+  # Dashed line parameters
+  dash_length: 20  # Length of dash segments (pixels)
+  gap_length: 10  # Length of gaps between dashes (pixels)
+
+  # Double line parameters
+  double_offset: 6  # Offset between parallel lines (pixels)
+
+# Arrow rendering
+arrow:
+  # Minimum sizes for arrow detection
+  min_mask_area: 25  # Minimum mask area in pixels
+  min_contour_area: 20  # Minimum contour area
+  min_box_width: 3  # Minimum bounding box width
+  min_box_height: 3  # Minimum bounding box height
+
+  # Template parameters
+  template_size: 200  # Size of arrow template image
+  thickness: 22  # Arrow line thickness
+  outline_thickness: 28  # Outline thickness
+  tip_size: 45  # Size of arrow tip
+  combined_thickness: 15  # Thickness for combined arrows (straight+left/right)
+  combined_outline: 21  # Outline thickness for combined arrows
+  combined_tip_size: 35  # Tip size for combined arrows
+
+  # Blending
+  alpha: 0.9  # Transparency for arrow overlay (0.0-1.0)
+
+# Crosswalk rendering
+crosswalk:
+  template_size: 200  # Size of crosswalk template
+  num_stripes: 8  # Number of white stripes
+  alpha: 0.9  # Transparency for overlay (0.0-1.0)
+
+# Stop line rendering
+stop_line:
+  outline_thickness: 12  # Black outline thickness
+  line_thickness: 8  # White line thickness
+
+# Box junction rendering
+box_junction:
+  template_size: 200  # Template size
+  line_thickness: 7  # Diagonal line thickness
+  line_spacing: 25  # Spacing between diagonal lines
+  alpha: 0.85  # Transparency (0.0-1.0)
+
+# Channelizing line rendering
+channelizing:
+  alpha: 0.85  # Transparency (0.0-1.0)
+
+# Icon rendering
+icon:
+  outline_offset: 2  # Outline thickness offset
+  base_thickness: 3  # Base icon line thickness
+
+# Priority levels for rendering order (higher = rendered last)
+priority:
+  lines: 1  # Lane lines (lowest priority)
+  surface_marks: 2  # Box junction, channelizing
+  stop_cross: 3  # Stop lines and crosswalks
+  arrows_icons: 4  # Arrows and icons (highest priority)
+
+# Class ID groupings for priority
+class_groups:
+  lines: [4, 5, 6, 7, 8, 9, 10]
+  surface_marks: [1, 16]  # box junction, channelizing
+  stop_cross: [2, 3]  # crosswalk, stop line
+  arrows_icons: [11, 12, 13, 14, 15, 22, 23]  # arrows and icons
+
+# Line colors (BGR format for OpenCV)
+line_colors:
+  white: [255, 255, 255]
+  yellow: [0, 255, 255]  # Bright Yellow
+  red: [0, 0, 255]  # Bright Red
+  unknown: [200, 200, 200]  # Light gray
+
+# Arrow and icon colors
+arrow_color: [0, 255, 255]  # Bright cyan
+icon_color: [0, 255, 255]  # Bright cyan
+outline_color: [0, 0, 0]  # Black

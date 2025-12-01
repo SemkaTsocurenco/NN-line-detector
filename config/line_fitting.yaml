@@ -1,0 +1,33 @@
+# Line Fitting Configuration
+# RANSAC-based polynomial line fitting parameters
+
+# General settings
+enabled: true
+split_by_center: true  # Split masks into left/right halves
+
+# Polynomial settings
+poly_degree: 2  # Degree of polynomial (1=line, 2=parabola)
+
+# RANSAC parameters
+ransac:
+  max_iterations: 100  # Maximum RANSAC iterations
+  inlier_threshold: 5.0  # Distance threshold for inliers (pixels)
+  min_inlier_ratio: 0.3  # Minimum ratio of inliers to accept fit (0.0-1.0)
+  min_points: 20  # Minimum number of points required for fitting
+
+# Mask processing
+mask:
+  split_margin: 20  # Margin around center when splitting masks (pixels)
+  binarization_threshold: 127  # Threshold for converting mask to binary (0-255)
+
+# Line validation parameters
+validation:
+  enabled: false  # Enable line validation checks
+  max_curvature: 0.002  # Maximum allowed curvature (a coefficient)
+  max_horizontal_change: 100.0  # Max pixels X can change over line
+  min_length: 30  # Minimum line length in pixels
+  max_length: 400  # Maximum line length in pixels
+  max_angle_deviation: 45.0  # Max deviation from vertical (degrees)
+
+# Line class IDs (lane markings)
+line_class_ids: [4, 5, 6, 7, 8, 9, 10]

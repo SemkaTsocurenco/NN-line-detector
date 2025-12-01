@@ -1,0 +1,55 @@
+# Protocol Configuration
+# TCP protocol parameters for sending detection data
+
+# Protocol constants
+protocol:
+  sync_byte: 0xAA  # Frame synchronization byte
+  version: 0x01  # Protocol version
+  max_payload_size: 1024  # Maximum payload size in bytes
+
+# CRC parameters
+crc:
+  initial_value: 0xFFFF  # CRC16-IBM initial value
+  polynomial: 0xA001  # CRC16-IBM polynomial (reflected)
+
+# Sequence counter
+sequence:
+  max_value: 256  # Sequence counter wraps at this value (0-255)
+
+# Message sizes (bytes per object/line)
+message_sizes:
+  marking_object: 13  # Size of one MarkingObject in basic frame
+  marking_object_ex: 15  # Size of one MarkingObject in extended frame
+  fitted_line: 23  # Size of one FittedLine in polynomial frame
+
+# Frame overhead (bytes)
+frame_overhead:
+  sync: 1  # Sync byte
+  header: 9  # Version + Type + Seq + Timestamp + Length
+  crc: 2  # CRC16
+  count: 1  # Object/line count byte
+
+# Line classification for protocol messages
+line_classification:
+  # Map class IDs to line colors (for protocol)
+  yellow_classes: [5, 8, 10]
+  red_classes: [6]
+  # Others default to white (0)
+
+  # Map class IDs to line styles
+  solid_classes: [4, 5, 6]
+  double_classes: [7, 8]
+  dashed_classes: [9, 10]
+  # Others default to unknown (0)
+
+# Side mapping for fitted lines
+side_mapping:
+  unknown: 0
+  left: 1
+  right: 2
+  center: 3
+
+# Conversion parameters
+conversion:
+  confidence_scale: 255  # Scale factor for float confidence to byte
+  inlier_ratio_scale: 255  # Scale factor for float inlier_ratio to byte

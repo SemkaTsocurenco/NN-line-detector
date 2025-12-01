@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
+import yaml
 
 from core.detections import (
     DetectionRaw,
@@ -18,6 +20,16 @@ from core.detections import (
 from core.line_fitting import LineFitter
 
 logger = logging.getLogger(__name__)
+
+
+def load_postprocess_config(config_path: str = "config/postprocess.yaml") -> Dict[str, Any]:
+    """Load postprocessing configuration from YAML file."""
+    path = Path(config_path)
+    if not path.exists():
+        logger.warning("Postprocess config not found at %s, using defaults", config_path)
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 @dataclass
@@ -35,9 +47,14 @@ class DetectionPostprocessor:
         params: PostprocessParams,
         geometry_mapper: Optional[GeometryMapper] = None,
         line_fitting_params: Optional[dict] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.params = params
-        self.geometry_mapper = geometry_mapper or GeometryMapper()
+        self.geometry_mapper = geometry_mapper or GeometryMapper(config=config)
+
+        # Load configuration
+        if config is None:
+            config = {}
 
         # Line fitting parameters
         lf_params = line_fitting_params or {}
@@ -51,7 +68,17 @@ class DetectionPostprocessor:
             min_inlier_ratio=lf_params.get("min_inlier_ratio", 0.3),
             min_points=lf_params.get("min_points", 20),
             split_margin=lf_params.get("split_margin", 20),
+            config=lf_params,
         )
+
+        # Load config values
+        self.config = config
+        geom_cfg = config.get("geometry", {})
+        self.normalization_scale = geom_cfg.get("normalization_scale", 100)
+        self.quality_multiplier = geom_cfg.get("quality_multiplier", 20)
+        self.max_quality = geom_cfg.get("max_quality", 255)
+        self.confidence_to_byte_scale = geom_cfg.get("confidence_to_byte_scale", 255)
+        self.bbox_area_offset = geom_cfg.get("bbox_area_offset", 1)
 
     def update_params(self, params: PostprocessParams) -> None:
         self.params = params
@@ -98,7 +125,7 @@ class DetectionPostprocessor:
         def offsets(det: Optional[DetectionRaw]) -> int:
             if det and det.bbox:
                 cx = 0.5 * (det.bbox[0] + det.bbox[2])
-                return int(round((cx - w / 2.0) / max(w, 1) * 100))
+                return int(round((cx - w / 2.0) / max(w, 1) * self.normalization_scale))
             return 0
 
         left_offset_dm = offsets(left_det)
@@ -110,10 +137,10 @@ class DetectionPostprocessor:
         if right_offset_dm > 0:
             maneuvers |= ManeuverFlags.RIGHT
 
-        quality = min(255, len(detections) * 20)
+        quality = min(self.max_quality, len(detections) * self.quality_multiplier)
 
-        left_quality = int(min(255, (left_det.confidence * 255) if left_det else 0))
-        right_quality = int(min(255, (right_det.confidence * 255) if right_det else 0))
+        left_quality = int(min(self.max_quality, (left_det.confidence * self.confidence_to_byte_scale) if left_det else 0))
+        right_quality = int(min(self.max_quality, (right_det.confidence * self.confidence_to_byte_scale) if right_det else 0))
 
         left_width_dm = self._width_dm(left_det, w)
         right_width_dm = self._width_dm(right_det, w)
@@ -151,13 +178,13 @@ class DetectionPostprocessor:
             right_boundary=right_boundary,
         )
 
-    @staticmethod
-    def _area(det: DetectionRaw) -> Optional[float]:
+    def _area(self, det: DetectionRaw) -> Optional[float]:
         if det.mask is not None:
             return float((det.mask > 0).sum())
         if det.bbox is not None:
             x1, y1, x2, y2 = det.bbox
-            return float(max(0, x2 - x1 + 1) * max(0, y2 - y1 + 1))
+            offset = self.bbox_area_offset
+            return float(max(0, x2 - x1 + offset) * max(0, y2 - y1 + offset))
         return None
 
     @staticmethod
@@ -170,7 +197,7 @@ class DetectionPostprocessor:
     def _width_dm(self, det: Optional[DetectionRaw], frame_w: int) -> int:
         if det and det.bbox:
             x1, _, x2, _ = det.bbox
-            return int(round(max(1.0, x2 - x1) / max(frame_w, 1) * 100))
+            return int(round(max(1.0, x2 - x1) / max(frame_w, 1) * self.normalization_scale))
         return 0
 
     def _pick_left_right(self, detections: List[DetectionRaw], frame_shape: Tuple[int, int, int]) -> Tuple[Optional[DetectionRaw], Optional[DetectionRaw]]:
@@ -225,17 +252,17 @@ class DetectionPostprocessor:
         confidence = max(a.confidence, b.confidence)
         return DetectionRaw(class_id=a.class_id, confidence=confidence, mask=mask, bbox=bbox)
 
-    @staticmethod
-    def _iou(b1: Tuple[int, int, int, int], b2: Tuple[int, int, int, int]) -> float:
+    def _iou(self, b1: Tuple[int, int, int, int], b2: Tuple[int, int, int, int]) -> float:
+        offset = self.bbox_area_offset
         xA = max(b1[0], b2[0])
         yA = max(b1[1], b2[1])
         xB = min(b1[2], b2[2])
         yB = min(b1[3], b2[3])
-        inter_w = max(0, xB - xA + 1)
-        inter_h = max(0, yB - yA + 1)
+        inter_w = max(0, xB - xA + offset)
+        inter_h = max(0, yB - yA + offset)
         inter = inter_w * inter_h
-        area1 = max(0, b1[2] - b1[0] + 1) * max(0, b1[3] - b1[1] + 1)
-        area2 = max(0, b2[2] - b2[0] + 1) * max(0, b2[3] - b2[1] + 1)
+        area1 = max(0, b1[2] - b1[0] + offset) * max(0, b1[3] - b1[1] + offset)
+        area2 = max(0, b2[2] - b2[0] + offset) * max(0, b2[3] - b2[1] + offset)
         union = area1 + area2 - inter
         if union == 0:
             return 0.0
@@ -245,8 +272,26 @@ class DetectionPostprocessor:
 class GeometryMapper:
     """Converts image detections to protocol-ready MarkingObjects."""
 
-    def __init__(self, calibration: Optional[dict] = None) -> None:
+    def __init__(self, calibration: Optional[dict] = None, config: Optional[Dict[str, Any]] = None) -> None:
         self.calibration = calibration or {}
+
+        # Load config
+        if config is None:
+            config = {}
+
+        geom_cfg = config.get("geometry", {})
+        self.normalization_scale = geom_cfg.get("normalization_scale", 100)
+        self.confidence_to_byte_scale = geom_cfg.get("confidence_to_byte_scale", 255)
+
+        # Load line color and style mappings from config
+        line_colors_cfg = config.get("line_colors", {})
+        self.yellow_classes = set(line_colors_cfg.get("yellow_classes", [5, 8, 10, 12, 14, 15]))
+        self.red_classes = set(line_colors_cfg.get("red_classes", [6]))
+
+        line_styles_cfg = config.get("line_styles", {})
+        self.solid_classes = set(line_styles_cfg.get("solid_classes", [4, 5, 6]))
+        self.double_classes = set(line_styles_cfg.get("double_classes", [7, 8]))
+        self.dashed_classes = set(line_styles_cfg.get("dashed_classes", [9, 10]))
 
     def to_marking_objects(self, detections: Iterable[DetectionRaw], frame_shape: Tuple[int, int, int]) -> List[MarkingObject]:
         h, w, _ = frame_shape
@@ -261,12 +306,12 @@ class GeometryMapper:
             bh = max(1.0, y2 - y1)
 
             # Crude mapping: normalize image coords to +-50 dm window.
-            x_dm = int(round((cx - w / 2.0) / max(w, 1) * 100))
-            y_dm = int(round((h - cy) / max(h, 1) * 100))
-            length_dm = int(round(bh / max(h, 1) * 100))
-            width_dm = int(round(bw / max(w, 1) * 100))
+            x_dm = int(round((cx - w / 2.0) / max(w, 1) * self.normalization_scale))
+            y_dm = int(round((h - cy) / max(h, 1) * self.normalization_scale))
+            length_dm = int(round(bh / max(h, 1) * self.normalization_scale))
+            width_dm = int(round(bw / max(w, 1) * self.normalization_scale))
 
-            confidence_byte = int(max(0, min(255, det.confidence * 255)))
+            confidence_byte = int(max(0, min(self.confidence_to_byte_scale, det.confidence * self.confidence_to_byte_scale)))
             obj = MarkingObject(
                 class_id=det.class_id,
                 x_dm=x_dm,
@@ -291,25 +336,23 @@ class GeometryMapper:
         ys = [y1, 0.5 * (y1 + y2), y2]
         points: List[LaneBoundaryPoint] = []
         for x_px, y_px in zip(xs, ys):
-            x_dm = int(round((x_px - w / 2.0) / max(w, 1) * 100))
-            y_dm = int(round((h - y_px) / max(h, 1) * 100))
+            x_dm = int(round((x_px - w / 2.0) / max(w, 1) * self.normalization_scale))
+            y_dm = int(round((h - y_px) / max(h, 1) * self.normalization_scale))
             points.append(LaneBoundaryPoint(x_dm=x_dm, y_dm=y_dm))
         return points
 
-    @staticmethod
-    def _line_color_from_class(class_id: int) -> LineColor:
-        if class_id in {5, 8, 10, 12, 14, 15}:  # yellow-ish classes
+    def _line_color_from_class(self, class_id: int) -> LineColor:
+        if class_id in self.yellow_classes:
             return LineColor.YELLOW
-        if class_id in {6}:  # red
+        if class_id in self.red_classes:
             return LineColor.RED
         return LineColor.WHITE if class_id != 0 else LineColor.UNKNOWN
 
-    @staticmethod
-    def _line_style_from_class(class_id: int) -> LaneType:
-        if class_id in {4, 5, 6}:  # solid single
+    def _line_style_from_class(self, class_id: int) -> LaneType:
+        if class_id in self.solid_classes:
             return LaneType.SOLID
-        if class_id in {7, 8}:  # double
+        if class_id in self.double_classes:
             return LaneType.DOUBLE
-        if class_id in {9, 10}:  # dashed
+        if class_id in self.dashed_classes:
             return LaneType.DASHED
         return LaneType.UNKNOWN

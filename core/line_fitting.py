@@ -8,11 +8,23 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
+import yaml
 
 logger = logging.getLogger(__name__)
+
+
+def load_line_fitting_config(config_path: str = "config/line_fitting.yaml") -> Dict[str, Any]:
+    """Load line fitting configuration from YAML file."""
+    path = Path(config_path)
+    if not path.exists():
+        logger.warning("Line fitting config not found at %s, using defaults", config_path)
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 @dataclass
@@ -44,6 +56,7 @@ class PolynomialRANSAC:
         inlier_threshold: float = 5.0,
         min_inlier_ratio: float = 0.3,
         min_points: int = 20,
+        config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize RANSAC fitter.
@@ -54,12 +67,17 @@ class PolynomialRANSAC:
             inlier_threshold: Distance threshold for inliers (pixels)
             min_inlier_ratio: Minimum ratio of inliers to accept fit
             min_points: Minimum number of points required for fitting
+            config: Configuration dict (overrides defaults if provided)
         """
+        if config is None:
+            config = {}
+
+        ransac_cfg = config.get("ransac", {})
         self.degree = degree
-        self.max_iterations = max_iterations
-        self.inlier_threshold = inlier_threshold
-        self.min_inlier_ratio = min_inlier_ratio
-        self.min_points = min_points
+        self.max_iterations = ransac_cfg.get("max_iterations", max_iterations)
+        self.inlier_threshold = ransac_cfg.get("inlier_threshold", inlier_threshold)
+        self.min_inlier_ratio = ransac_cfg.get("min_inlier_ratio", min_inlier_ratio)
+        self.min_points = ransac_cfg.get("min_points", min_points)
 
     def fit(self, points: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """
@@ -149,11 +167,12 @@ class LineValidator:
 
     def __init__(
         self,
-        max_curvature: float = 0.002,  # Maximum allowed curvature (a coefficient)
-        max_horizontal_change: float = 100.0,  # Max pixels X can change over line
-        min_length: int = 30,  # Minimum line length in pixels
-        max_length: int = 400,  # Maximum line length in pixels
-        max_angle_deviation: float = 45.0,  # Max deviation from vertical (degrees)
+        max_curvature: float = 0.002,
+        max_horizontal_change: float = 100.0,
+        min_length: int = 30,
+        max_length: int = 400,
+        max_angle_deviation: float = 45.0,
+        config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize line validator.
@@ -164,12 +183,17 @@ class LineValidator:
             min_length: Minimum line length
             max_length: Maximum line length
             max_angle_deviation: Maximum angle from vertical
+            config: Configuration dict (overrides defaults if provided)
         """
-        self.max_curvature = max_curvature
-        self.max_horizontal_change = max_horizontal_change
-        self.min_length = min_length
-        self.max_length = max_length
-        self.max_angle_deviation = max_angle_deviation
+        if config is None:
+            config = {}
+
+        val_cfg = config.get("validation", {})
+        self.max_curvature = val_cfg.get("max_curvature", max_curvature)
+        self.max_horizontal_change = val_cfg.get("max_horizontal_change", max_horizontal_change)
+        self.min_length = val_cfg.get("min_length", min_length)
+        self.max_length = val_cfg.get("max_length", max_length)
+        self.max_angle_deviation = val_cfg.get("max_angle_deviation", max_angle_deviation)
 
     def validate(self, fitted_line: FittedLine) -> bool:
         """
@@ -259,6 +283,7 @@ class LineFitter:
         validate_lines: bool = False,
         max_curvature: float = 0.2,
         max_horizontal_change: float = 100.0,
+        config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize line fitter.
@@ -273,23 +298,41 @@ class LineFitter:
             validate_lines: Enable line validation
             max_curvature: Maximum allowed curvature
             max_horizontal_change: Maximum horizontal drift
+            config: Configuration dict (overrides defaults if provided)
         """
+        if config is None:
+            config = {}
+
+        # Get config values with fallback to defaults
+        poly_degree = config.get("poly_degree", poly_degree)
+        mask_cfg = config.get("mask", {})
+        split_margin = mask_cfg.get("split_margin", split_margin)
+        val_cfg = config.get("validation", {})
+        validate_lines = val_cfg.get("enabled", validate_lines)
+
         self.ransac = PolynomialRANSAC(
             degree=poly_degree,
             max_iterations=ransac_iterations,
             inlier_threshold=inlier_threshold,
             min_inlier_ratio=min_inlier_ratio,
             min_points=min_points,
+            config=config,
         )
         self.split_margin = split_margin
         self.validate_lines = validate_lines
         self.validator = LineValidator(
             max_curvature=max_curvature,
             max_horizontal_change=max_horizontal_change,
+            config=config,
         ) if validate_lines else None
 
-    @staticmethod
-    def _split_mask_by_center(mask: np.ndarray, margin: int = 20) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        # Get binarization threshold from config
+        self.binarization_threshold = mask_cfg.get("binarization_threshold", 127)
+
+        # Get line class IDs from config
+        self._line_class_ids = config.get("line_class_ids", [4, 5, 6, 7, 8, 9, 10])
+
+    def _split_mask_by_center(self, mask: np.ndarray, margin: Optional[int] = None) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Split a mask into left and right halves based on image center.
 
@@ -300,6 +343,9 @@ class LineFitter:
         Returns:
             Tuple of (left_mask, right_mask), each can be None if no pixels
         """
+        if margin is None:
+            margin = self.split_margin
+
         if mask.max() == 0:
             return None, None
 
@@ -387,8 +433,7 @@ class LineFitter:
 
         return fitted_line
 
-    @staticmethod
-    def _extract_points_from_mask(mask: np.ndarray) -> Optional[np.ndarray]:
+    def _extract_points_from_mask(self, mask: np.ndarray) -> Optional[np.ndarray]:
         """
         Extract (x, y) points from binary mask.
 
@@ -402,7 +447,7 @@ class LineFitter:
             return None
 
         # Convert to binary if needed
-        binary_mask = (mask > 127).astype(np.uint8) if mask.max() > 1 else mask
+        binary_mask = (mask > self.binarization_threshold).astype(np.uint8) if mask.max() > 1 else mask
 
         # Get coordinates of non-zero pixels
         ys, xs = np.nonzero(binary_mask)
@@ -433,7 +478,8 @@ class LineFitter:
         fitted_lines = []
 
         # Line class IDs (4-10: various lane markings)
-        LINE_CLASS_IDS = {4, 5, 6, 7, 8, 9, 10}
+        # Can be configured via config file
+        LINE_CLASS_IDS = set(getattr(self, '_line_class_ids', [4, 5, 6, 7, 8, 9, 10]))
 
         for det in detections:
             # Only process line classes

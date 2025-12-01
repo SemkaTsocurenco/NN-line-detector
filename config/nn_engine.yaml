@@ -1,0 +1,56 @@
+# Neural Network Engine Configuration
+# Parameters for model inference and preprocessing
+
+# Model settings
+model:
+  path: NN/model_traced.pt
+  device: cpu  # cpu, cuda, cuda:0, cuda:1, etc.
+
+# Input preprocessing
+input:
+  size: [384, 384]  # [width, height] or null for no resize
+
+  # Normalization parameters (ImageNet standard)
+  normalization:
+    scale: 255.0  # Divide pixel values by this (0-255 -> 0-1)
+    mean: [0.485, 0.456, 0.406]  # RGB mean values
+    std: [0.229, 0.224, 0.225]  # RGB standard deviations
+
+# Output processing
+output:
+  background_class_id: 0  # Class ID to ignore (background)
+  min_area: 0  # Minimum area to keep detection (pixels)
+
+# Class definitions
+classes:
+  num_classes: 25
+  names:
+    '0': background
+    '1': box_junction
+    '2': crosswalk
+    '3': stop_line
+    '4': solid_single_white
+    '5': solid_single_yellow
+    '6': solid_single_red
+    '7': solid_double_white
+    '8': solid_double_yellow
+    '9': dashed_single_white
+    '10': dashed_single_yellow
+    '11': left_arrow
+    '12': straight_arrow
+    '13': right_arrow
+    '14': left_straight_arrow
+    '15': right_straight_arrow
+    '16': channelizing_line
+    '17': motor_prohibited
+    '18': slow
+    '19': motor_priority_lane
+    '20': motor_waiting_zone
+    '21': left_turn_box
+    '22': motor_icon
+    '23': bike_icon
+    '24': parking_lot
+
+# CUDA optimization
+cuda:
+  use_fp16: true  # Use FP16 on CUDA for faster inference
