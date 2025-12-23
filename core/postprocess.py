@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import yaml
 
@@ -537,40 +539,114 @@ class GeometryMapper:
         self.solid_classes = set(line_styles_cfg.get("solid_classes", [4, 5, 6]))
         self.double_classes = set(line_styles_cfg.get("double_classes", [7, 8]))
         self.dashed_classes = set(line_styles_cfg.get("dashed_classes", [9, 10]))
+        arrow_cfg = config.get("arrow_clustering", {})
+        self.arrow_classes = set(arrow_cfg.get("arrow_classes", [11, 12, 13, 14, 15]))
 
     def to_marking_objects(self, detections: Iterable[DetectionRaw], frame_shape: Tuple[int, int, int]) -> List[MarkingObject]:
         h, w, _ = frame_shape
         result: List[MarkingObject] = []
         for det in detections:
-            if det.bbox is None:
+            geometry = self._extract_object_geometry(det)
+            if geometry is None:
                 continue
-            x1, y1, x2, y2 = det.bbox
-            cx = 0.5 * (x1 + x2)
-            cy = 0.5 * (y1 + y2)
-            bw = max(1.0, x2 - x1)
-            bh = max(1.0, y2 - y1)
+            cx, cy, length_px, width_px, yaw_deg = geometry
 
             # Crude mapping: normalize image coords to +-50 dm window.
             x_dm = int(round((cx - w / 2.0) / max(w, 1) * self.normalization_scale))
             y_dm = int(round((h - cy) / max(h, 1) * self.normalization_scale))
-            length_dm = int(round(bh / max(h, 1) * self.normalization_scale))
-            width_dm = int(round(bw / max(w, 1) * self.normalization_scale))
+            length_dm = int(round(length_px / max(h, 1) * self.normalization_scale))
+            width_dm = int(round(width_px / max(w, 1) * self.normalization_scale))
+            yaw_decideg = int(round(yaw_deg * 10.0))
 
             confidence_byte = int(max(0, min(self.confidence_to_byte_scale, det.confidence * self.confidence_to_byte_scale)))
+
+            # Convert yaw to radians for v2 protocol
+            yaw_rad = math.radians(yaw_deg)
+
             obj = MarkingObject(
                 class_id=det.class_id,
                 x_dm=x_dm,
                 y_dm=y_dm,
                 length_dm=length_dm,
                 width_dm=width_dm,
-                yaw_decideg=0,
+                yaw_decideg=yaw_decideg,
                 confidence_byte=confidence_byte,
                 flags=0,
                 line_color=self._line_color_from_class(det.class_id),
                 line_style=self._line_style_from_class(det.class_id),
+                # Store original pixel coordinates for accurate transformation in v2 protocol
+                bbox_px=det.bbox,
+                center_px=(cx, cy),
+                yaw_rad=yaw_rad,
             )
             result.append(obj)
         return result
+
+    def _extract_object_geometry(self, det: DetectionRaw) -> Optional[Tuple[float, float, float, float, float]]:
+        """
+        Extract center, length, width and yaw for a detection.
+
+        For arrows we prefer contour-based geometry (same as renderer) to keep TCP data aligned
+        with what is drawn. For other classes fall back to the axis-aligned bbox.
+        """
+        if det.mask is not None and (det.class_id in self.arrow_classes or det.bbox is None):
+            geom = self._geometry_from_mask(det.mask)
+            if geom is not None:
+                return geom
+
+        if det.bbox is None:
+            return None
+
+        x1, y1, x2, y2 = det.bbox
+        cx = 0.5 * (x1 + x2)
+        cy = 0.5 * (y1 + y2)
+        bw = max(1.0, x2 - x1)
+        bh = max(1.0, y2 - y1)
+        return (cx, cy, bh, bw, 0.0)
+
+    @staticmethod
+    def _geometry_from_mask(mask: np.ndarray) -> Optional[Tuple[float, float, float, float, float]]:
+        """
+        Derive geometry from a binary mask using min-area rectangle and PCA direction.
+
+        Returns (cx, cy, length_px, width_px, yaw_deg).
+        """
+        if mask is None or mask.size == 0:
+            return None
+
+        binary = (mask > 0).astype(np.uint8)
+        if not np.any(binary):
+            return None
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        contour = max(contours, key=cv2.contourArea)
+        (cx, cy), (w_box, h_box), _ = cv2.minAreaRect(contour)
+        length_px = float(max(w_box, h_box))
+        width_px = float(max(1.0, min(w_box, h_box)))
+
+        # Estimate orientation via PCA on mask coordinates for stability
+        yaw_deg = 0.0
+        ys, xs = np.nonzero(binary)
+        if len(xs) >= 2:
+            coords = np.column_stack([xs - xs.mean(), ys - ys.mean()])
+            try:
+                eigvals, eigvecs = np.linalg.eigh(np.cov(coords, rowvar=False))
+                idx = int(np.argmax(eigvals))
+                direction = eigvecs[:, idx]
+                norm = float(np.linalg.norm(direction))
+                if norm > 0:
+                    dx, dy = direction / norm
+                    # Prefer forward (-y) orientation to keep yaw stable across frames
+                    if dy > 0:
+                        dx, dy = -dx, -dy
+                    yaw_deg = math.degrees(math.atan2(dx, -dy))
+            except np.linalg.LinAlgError:
+                yaw_deg = 0.0
+
+        return (float(cx), float(cy), max(length_px, 1.0), max(width_px, 1.0), yaw_deg)
 
     def boundary_points_from_bbox(self, det: DetectionRaw, frame_shape: Tuple[int, int, int]) -> List[LaneBoundaryPoint]:
         if det.bbox is None:

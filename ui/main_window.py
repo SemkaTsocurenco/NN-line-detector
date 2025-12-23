@@ -290,16 +290,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._protocol_builder or not self._tcp_client:
             return
         try:
-            lane_frame = self._protocol_builder.build_lane_summary_frame(summary)
-            objects_frame = self._protocol_builder.build_marking_objects_frame(objects)
-            lane_details = self._protocol_builder.build_lane_details_frame(summary)
-            objects_ex = self._protocol_builder.build_marking_objects_ex_frame(objects)
-            fitted_lines_frame = self._protocol_builder.build_fitted_lines_frame(fitted_lines)
-            self._tcp_client.send(lane_frame)
-            self._tcp_client.send(objects_frame)
-            self._tcp_client.send(lane_details)
-            self._tcp_client.send(objects_ex)
-            self._tcp_client.send(fitted_lines_frame)
+            # NEW V2 PROTOCOL: Only 2 message types
+            # 1. Lane lines (fitted polynomial curves with 3 points in meters)
+            lane_lines_frame = self._protocol_builder.build_lane_lines_frame(fitted_lines)
+
+            # 2. Road objects (arrows, crosswalks, etc. with coordinates in meters)
+            road_objects_frame = self._protocol_builder.build_road_objects_frame(objects)
+
+            # Send the 2 frames
+            self._tcp_client.send(lane_lines_frame)
+            self._tcp_client.send(road_objects_frame)
+
+            logger.debug("Sent v2 protocol: %d lines, %d objects", len(fitted_lines), len(objects))
         except Exception as exc:
             logger.error("Failed to build/send protocol frames: %s", exc)
 

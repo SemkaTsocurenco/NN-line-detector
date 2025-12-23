@@ -51,6 +51,10 @@ class MarkingObject:
     flags: int = 0
     line_color: LineColor = LineColor.UNKNOWN
     line_style: LaneType = LaneType.UNKNOWN
+    # Store original pixel coordinates for accurate coordinate transformation
+    bbox_px: Optional[Tuple[int, int, int, int]] = None  # (x1, y1, x2, y2) in pixels
+    center_px: Optional[Tuple[float, float]] = None  # (cx, cy) in pixels
+    yaw_rad: float = 0.0  # Orientation in radians (for v2 protocol)
 
 
 @dataclass

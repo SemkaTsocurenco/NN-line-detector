@@ -5,11 +5,12 @@ import struct
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 import yaml
 
 from core.detections import LaneBoundaryPoint, LaneSummary, MarkingObject
+from core.coordinate_transform import CoordinateTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,19 @@ _seq_cfg = _protocol_config.get("sequence", {})
 _msg_sizes = _protocol_config.get("message_sizes", {})
 
 SYNC_BYTE = _prot_cfg.get("sync_byte", 0xAA)
-VERSION = _prot_cfg.get("version", 0x01)
-MSG_TYPE_LANE_SUMMARY = 0x01
-MSG_TYPE_MARKING_OBJECTS = 0x02
-MSG_TYPE_LANE_DETAILS = 0x03
-MSG_TYPE_MARKING_OBJECTS_EX = 0x04
-MSG_TYPE_FITTED_LINES = 0x05  # Polynomial fitted lines for 3D reconstruction
+VERSION = _prot_cfg.get("version", 0x02)  # Updated to v2 for new protocol
+
+# New message types (v2 protocol)
+MSG_TYPE_LANE_LINES = 0x01  # Lane marking lines with polynomial curves
+MSG_TYPE_ROAD_OBJECTS = 0x02  # Road objects (arrows, crosswalks, etc.)
+
+# Legacy message types (deprecated in v2)
+MSG_TYPE_LANE_SUMMARY_LEGACY = 0x11
+MSG_TYPE_MARKING_OBJECTS_LEGACY = 0x12
+MSG_TYPE_LANE_DETAILS_LEGACY = 0x13
+MSG_TYPE_MARKING_OBJECTS_EX_LEGACY = 0x14
+MSG_TYPE_FITTED_LINES_LEGACY = 0x15
+
 MAX_PAYLOAD_SIZE = _prot_cfg.get("max_payload_size", 1024)  # per spec: payload length constraint
 CRC_INITIAL = _crc_cfg.get("initial_value", 0xFFFF)
 CRC_POLYNOMIAL = _crc_cfg.get("polynomial", 0xA001)
@@ -84,6 +92,9 @@ class ProtocolBuilder:
         self.seq_counter = seq_counter or SeqCounter()
         self.time_provider = time_provider or TimeProvider()
 
+        # Initialize coordinate transformer
+        self.coordinate_transformer = CoordinateTransformer()
+
         # Load config
         if config is None:
             config = _protocol_config
@@ -92,6 +103,8 @@ class ProtocolBuilder:
         self.marking_object_size = msg_sizes.get("marking_object", 13)
         self.marking_object_ex_size = msg_sizes.get("marking_object_ex", 15)
         self.fitted_line_size = msg_sizes.get("fitted_line", 23)
+        self.lane_line_size = msg_sizes.get("lane_line", 71)  # V2: 3 bytes (BBB) + 68 bytes (17 floats) = 71 bytes per line
+        self.road_object_size = msg_sizes.get("road_object", 23)  # V2: 1+20(5 floats)+1+1 = 23 bytes per object
 
         conv_cfg = config.get("conversion", {})
         self.confidence_scale = conv_cfg.get("confidence_scale", 255)
@@ -296,6 +309,203 @@ class ProtocolBuilder:
         crc = crc16_ibm(frame_wo_crc[1:])  # without sync byte
         frame = frame_wo_crc + struct.pack("<H", crc)
         return frame
+
+    # ========== NEW V2 PROTOCOL METHODS ==========
+
+    def build_lane_lines_frame(self, fitted_lines: Iterable) -> bytes:
+        """
+        Build frame with lane marking lines (v2 protocol - message type 0x01).
+
+        Each line contains:
+        - side (1 byte): 0=unknown, 1=left, 2=right, 3=center
+        - style (1 byte): 0=unknown, 1=solid, 2=dashed, 3=double
+        - color (1 byte): 0=unknown, 1=white, 2=yellow, 3=red
+        - poly_a (float, 4 bytes): coefficient 'a' for x = ay^2 + by + c
+        - poly_b (float, 4 bytes): coefficient 'b'
+        - poly_c (float, 4 bytes): coefficient 'c'
+        - x (float, 4 bytes): X coordinate in meters
+        - y (float, 4 bytes): Y coordinate in meters
+        - point1_x_m (float, 4 bytes): top point X in meters
+        - point1_y_m (float, 4 bytes): top point Y in meters
+        - point2_x_m (float, 4 bytes): middle point X in meters
+        - point2_y_m (float, 4 bytes): middle point Y in meters
+        - point3_x_m (float, 4 bytes): bottom point X in meters
+        - point3_y_m (float, 4 bytes): bottom point Y in meters
+        - point1_x_px (float, 4 bytes): top point X in pixels (OpenCV coords)
+        - point1_y_px (float, 4 bytes): top point Y in pixels (OpenCV coords)
+        - point2_x_px (float, 4 bytes): middle point X in pixels (OpenCV coords)
+        - point2_y_px (float, 4 bytes): middle point Y in pixels (OpenCV coords)
+        - point3_x_px (float, 4 bytes): bottom point X in pixels (OpenCV coords)
+        - point3_y_px (float, 4 bytes): bottom point Y in pixels (OpenCV coords)
+
+        Total: 59 bytes per line
+        Frame size: 1(sync) + 9(header) + 1(count) + N*59 + 2(crc) bytes
+        """
+        lines_list = list(fitted_lines)
+        max_lines = (MAX_PAYLOAD_SIZE - 1) // self.lane_line_size
+        if len(lines_list) > max_lines:
+            logger.warning("Trimming lane lines from %d to %d to satisfy frame size", len(lines_list), max_lines)
+            lines_list = lines_list[:max_lines]
+
+        count = len(lines_list)
+        payload_parts = [struct.pack("<B", count)]
+
+        for line in lines_list:
+            # Map side string to byte
+            side_byte = self.side_mapping.get(line.side, 0)
+
+            # Get color and style from class_id
+            color_byte = self._get_line_color_byte(line.class_id)
+            style_byte = self._get_line_style_byte(line.class_id)
+
+            # Extract polynomial coefficients [a, b, c] for x = ay^2 + by + c
+            if len(line.poly_coeffs) >= 3:
+                poly_a = float(line.poly_coeffs[0])
+                poly_b = float(line.poly_coeffs[1])
+                poly_c = float(line.poly_coeffs[2])
+            else:
+                poly_a = poly_b = poly_c = 0.0
+
+            # Get start and end Y coordinates in pixels
+            x_start_px, y_start_px = line.start_point
+            x_end_px, y_end_px = line.end_point
+
+            # Calculate 3 sample points in pixels (top, middle, bottom)
+            import numpy as np
+            y_samples = np.linspace(y_start_px, y_end_px, 3)
+            x_samples = np.polyval(line.poly_coeffs, y_samples)
+
+            # Points in pixels (OpenCV format: origin top-left, X right, Y down)
+            p1_x_px, p1_y_px = float(x_samples[0]), float(y_samples[0])  # Top
+            p2_x_px, p2_y_px = float(x_samples[1]), float(y_samples[1])  # Middle
+            p3_x_px, p3_y_px = float(x_samples[2]), float(y_samples[2])  # Bottom
+
+            # Convert 3 points along the line to meters using coordinate transformer
+            # Points: top (y_start), middle, bottom (y_end)
+            points_m = self.coordinate_transformer.get_line_points_in_meters(
+                line.poly_coeffs,
+                y_start_px,
+                y_end_px,
+                num_samples=3
+            )
+
+            # Unpack the 3 points in meters
+            if len(points_m) >= 3:
+                p1_x_m, p1_y_m = points_m[0]  # Top point in meters
+                p2_x_m, p2_y_m = points_m[1]  # Middle point in meters
+                p3_x_m, p3_y_m = points_m[2]  # Bottom point in meters
+            else:
+                # Fallback if conversion fails
+                p1_x_m = p1_y_m = p2_x_m = p2_y_m = p3_x_m = p3_y_m = 0.0
+
+            # Calculate center point in meters (use middle point)
+            x_m = p2_x_m
+            y_m = p2_y_m
+
+            payload_parts.append(
+                struct.pack(
+                    "<BBBfffffffffffffffff",  # 3 bytes + 17 floats = 71 bytes
+                    # poly(3) + xy(2) + points_m(6) + points_px(6) = 17 floats
+                    side_byte & 0xFF,
+                    style_byte & 0xFF,
+                    color_byte & 0xFF,
+                    poly_a,
+                    poly_b,
+                    poly_c,
+                    x_m,
+                    y_m,
+                    p1_x_m,
+                    p1_y_m,
+                    p2_x_m,
+                    p2_y_m,
+                    p3_x_m,
+                    p3_y_m,
+                    p1_x_px,
+                    p1_y_px,
+                    p2_x_px,
+                    p2_y_px,
+                    p3_x_px,
+                    p3_y_px,
+                )
+            )
+
+        payload = b"".join(payload_parts)
+        return self._build_frame(MSG_TYPE_LANE_LINES, payload)
+
+    def build_road_objects_frame(self, objects: Iterable[MarkingObject]) -> bytes:
+        """
+        Build frame with road objects (v2 protocol - message type 0x02).
+
+        Each object contains:
+        - class_id (1 byte): object class (arrows, crosswalks, etc.)
+        - center_x (float, 4 bytes): center X position in meters
+        - center_y (float, 4 bytes): center Y position in meters
+        - length (float, 4 bytes): object length in meters
+        - width (float, 4 bytes): object width in meters
+        - yaw (float, 4 bytes): orientation angle in radians
+        - confidence (1 byte): detection confidence 0-255
+        - flags (1 byte): status flags
+        - reserved (2 bytes): for future use
+
+        Total: 25 bytes per object
+        Frame size: 1(sync) + 9(header) + 1(count) + N*25 + 2(crc) bytes
+        """
+        objs_list: List[MarkingObject] = list(objects)
+        max_objects = (MAX_PAYLOAD_SIZE - 1) // self.road_object_size
+        if len(objs_list) > max_objects:
+            logger.warning("Trimming road objects from %d to %d to satisfy frame size", len(objs_list), max_objects)
+            objs_list = objs_list[:max_objects]
+
+        count = len(objs_list)
+        payload_parts = [struct.pack("<B", count)]
+
+        for obj in objs_list:
+            # Use pixel coordinates if available, otherwise fall back to dm values
+            if obj.center_px and obj.bbox_px:
+                # Convert center from pixels to meters using perspective transform
+                center_x_m, center_y_m = self.coordinate_transformer.pixel_to_meters(
+                    obj.center_px[0],
+                    obj.center_px[1]
+                )
+
+                # Convert bbox dimensions from pixels to meters
+                length_m, width_m = self.coordinate_transformer.get_bbox_dimensions_in_meters(
+                    obj.bbox_px
+                )
+
+                # Use stored yaw in radians
+                yaw_rad = obj.yaw_rad
+            else:
+                # Fallback: convert existing dm values to meters
+                logger.warning("Object missing pixel coordinates, using dm fallback for class_id=%d", obj.class_id)
+                center_x_m = float(obj.x_dm) / 10.0
+                center_y_m = float(obj.y_dm) / 10.0
+                length_m = float(obj.length_dm) / 10.0
+                width_m = float(obj.width_dm) / 10.0
+                yaw_rad = float(obj.yaw_decideg) / 10.0 * (3.14159265359 / 180.0)
+
+            # Confidence byte
+            confidence_byte = obj.confidence_byte & 0xFF
+
+            # Flags
+            flags = obj.flags & 0xFF
+
+            payload_parts.append(
+                struct.pack(
+                    "<BfffffBB",  # 1 byte + 5 floats + 2 bytes = 1+20+2 = 23 bytes total
+                    obj.class_id & 0xFF,
+                    center_x_m,
+                    center_y_m,
+                    length_m,
+                    width_m,
+                    yaw_rad,
+                    confidence_byte,
+                    flags,
+                )
+            )
+
+        payload = b"".join(payload_parts)
+        return self._build_frame(MSG_TYPE_ROAD_OBJECTS, payload)
 
 
 if __name__ == "__main__":  # simple manual self-check
