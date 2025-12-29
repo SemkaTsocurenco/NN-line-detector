@@ -104,7 +104,7 @@ class ProtocolBuilder:
         self.marking_object_ex_size = msg_sizes.get("marking_object_ex", 15)
         self.fitted_line_size = msg_sizes.get("fitted_line", 23)
         self.lane_line_size = msg_sizes.get("lane_line", 71)  # V2: 3 bytes (BBB) + 68 bytes (17 floats) = 71 bytes per line
-        self.road_object_size = msg_sizes.get("road_object", 23)  # V2: 1+20(5 floats)+1+1 = 23 bytes per object
+        self.road_object_size = msg_sizes.get("road_object", 41)  # V2: 1+36(9 floats)+1+1+2(reserved) = 41 bytes per object
 
         conv_cfg = config.get("conversion", {})
         self.confidence_scale = conv_cfg.get("confidence_scale", 255)
@@ -436,19 +436,23 @@ class ProtocolBuilder:
         """
         Build frame with road objects (v2 protocol - message type 0x02).
 
-        Each object contains:
+        Each object contains (41 bytes total):
         - class_id (1 byte): object class (arrows, crosswalks, etc.)
-        - center_x (float, 4 bytes): center X position in meters
-        - center_y (float, 4 bytes): center Y position in meters
-        - length (float, 4 bytes): object length in meters
-        - width (float, 4 bytes): object width in meters
-        - yaw (float, 4 bytes): orientation angle in radians
-        - confidence (1 byte): detection confidence 0-255
-        - flags (1 byte): status flags
-        - reserved (2 bytes): for future use
+        - center_x (float32, 4 bytes): center X position in meters
+        - center_y (float32, 4 bytes): center Y position in meters
+        - length (float32, 4 bytes): object length in meters
+        - width (float32, 4 bytes): object width in meters
+        - yaw (float32, 4 bytes): orientation angle in radians
+        - center_x_px (float32, 4 bytes): center X position in pixels
+        - center_y_px (float32, 4 bytes): center Y position in pixels
+        - width_px (float32, 4 bytes): object width in pixels
+        - length_px (float32, 4 bytes): object length in pixels
+        - confidence (uint8, 1 byte): detection confidence 0-255
+        - flags (uint8, 1 byte): status flags
+        - reserved (uint16, 2 bytes): for future use
 
-        Total: 25 bytes per object
-        Frame size: 1(sync) + 9(header) + 1(count) + N*25 + 2(crc) bytes
+        Total: 1 + 36 + 2 + 2 = 41 bytes per object
+        Frame size: 1(sync) + 9(header) + 1(count) + N*41 + 2(crc) bytes
         """
         objs_list: List[MarkingObject] = list(objects)
         max_objects = (MAX_PAYLOAD_SIZE - 1) // self.road_object_size
@@ -475,6 +479,14 @@ class ProtocolBuilder:
 
                 # Use stored yaw in radians
                 yaw_rad = obj.yaw_rad
+
+                # Pixel coordinates for dashboard rendering
+                center_x_px = float(obj.center_px[0])
+                center_y_px = float(obj.center_px[1])
+                # Calculate width and length in pixels from bbox
+                x1, y1, x2, y2 = obj.bbox_px
+                width_px = float(abs(x2 - x1))
+                length_px = float(abs(y2 - y1))
             else:
                 # Fallback: convert existing dm values to meters
                 logger.warning("Object missing pixel coordinates, using dm fallback for class_id=%d", obj.class_id)
@@ -483,6 +495,11 @@ class ProtocolBuilder:
                 length_m = float(obj.length_dm) / 10.0
                 width_m = float(obj.width_dm) / 10.0
                 yaw_rad = float(obj.yaw_decideg) / 10.0 * (3.14159265359 / 180.0)
+                # No pixel data available in fallback mode
+                center_x_px = 0.0
+                center_y_px = 0.0
+                width_px = 0.0
+                length_px = 0.0
 
             # Confidence byte
             confidence_byte = obj.confidence_byte & 0xFF
@@ -492,15 +509,20 @@ class ProtocolBuilder:
 
             payload_parts.append(
                 struct.pack(
-                    "<BfffffBB",  # 1 byte + 5 floats + 2 bytes = 1+20+2 = 23 bytes total
+                    "<BfffffffffBBH",  # 1 byte + 9 floats + 2 bytes + 2 bytes reserved = 1+36+2+2 = 41 bytes total
                     obj.class_id & 0xFF,
                     center_x_m,
                     center_y_m,
                     length_m,
                     width_m,
                     yaw_rad,
+                    center_x_px,
+                    center_y_px,
+                    width_px,
+                    length_px,
                     confidence_byte,
                     flags,
+                    0,  # reserved for future use
                 )
             )
 

@@ -249,6 +249,26 @@ class Renderer:
             # Draw colored contour on top
             cv2.drawContours(img, contours, -1, color, self.mask_contour_color_thickness)
 
+    def filter_detections_for_objects(self, detections: List[DetectionRaw]) -> List[DetectionRaw]:
+        """
+        Filter detections for road_objects message (same filtering as render).
+
+        Removes overlapping lower-priority detections and excludes line classes.
+
+        Returns:
+            Filtered list of detections that will be rendered as objects
+        """
+        if not detections:
+            return []
+
+        # First filter overlapping
+        filtered = self._filter_overlapping_detections(list(detections))
+
+        # Then exclude line classes (they go as fitted_lines, not road_objects)
+        result = [det for det in filtered if det.class_id not in self.class_group_lines]
+
+        return result
+
     def _get_detection_priority(self, class_id: int) -> int:
         """
         Get priority for class ID. Higher number = higher priority (drawn last).

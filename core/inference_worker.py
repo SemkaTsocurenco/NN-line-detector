@@ -99,7 +99,12 @@ class InferenceWorker(QtCore.QObject):
                 processed = self.postprocessor.process(raw, frame.shape)
                 fitted_lines = self.postprocessor.fit_lines(processed)
                 summary = self.postprocessor.build_lane_summary(processed, frame.shape)
-                objects = self.geometry_mapper.to_marking_objects(processed, frame.shape)
+
+                # Filter detections for road_objects (same filtering as renderer)
+                # This ensures TCP sends exactly what is rendered
+                filtered_for_objects = self.renderer.filter_detections_for_objects(processed)
+                objects = self.geometry_mapper.to_marking_objects(filtered_for_objects, frame.shape)
+
                 if self.render_output:
                     rendered = self.renderer.render(frame, processed, summary, fitted_lines, self.show_masks)
                     qimage = self._to_qimage(rendered)

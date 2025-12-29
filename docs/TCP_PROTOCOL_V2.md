@@ -158,8 +158,8 @@ line = {
 
 ### 0x02 - ROAD_OBJECTS (Объекты на дороге)
 
-**Размер payload:** `1 + N * 25` bytes (N объектов)
-**Общий размер кадра:** `12 + N * 25` bytes
+**Размер payload:** `1 + N * 41` bytes (N объектов)
+**Общий размер кадра:** `12 + N * 41` bytes
 
 Содержит информацию об объектах дорожной разметки (стрелки, пешеходные переходы, стоп-линии и т.д.)
 
@@ -167,7 +167,7 @@ line = {
 |------|-----|--------|----------|
 | count | uint8 | 1 byte | Количество объектов N |
 
-**Для каждого объекта (25 bytes):**
+**Для каждого объекта (41 bytes):**
 
 | Поле | Тип | Размер | Описание |
 |------|-----|--------|----------|
@@ -177,6 +177,10 @@ line = {
 | length | float32 | 4 bytes | Длина объекта в метрах |
 | width | float32 | 4 bytes | Ширина объекта в метрах |
 | yaw | float32 | 4 bytes | Ориентация в радианах (0 = вперёд) |
+| center_x_px | float32 | 4 bytes | Центр X в пикселях (OpenCV: 0,0 = верхний левый угол) |
+| center_y_px | float32 | 4 bytes | Центр Y в пикселях (OpenCV: Y вниз) |
+| width_px | float32 | 4 bytes | Ширина объекта в пикселях |
+| length_px | float32 | 4 bytes | Длина объекта в пикселях |
 | confidence | uint8 | 1 byte | Уверенность детектирования (0-255) |
 | flags | uint8 | 1 byte | Флаги состояния (битовая маска) |
 | reserved | uint16 | 2 bytes | Резерв для будущего использования |
@@ -186,11 +190,13 @@ line = {
 # Payload
 struct.pack("<B", count)  # Count of objects
 for each object:
-    struct.pack("<BffffBBH",
+    struct.pack("<BfffffffffBBH",
         class_id,
         center_x, center_y,
         length, width,
         yaw,
+        center_x_px, center_y_px,
+        width_px, length_px,
         confidence, flags,
         reserved)
 ```
@@ -206,6 +212,10 @@ arrow = {
     'length': 3.5,  # 3.5 метра в длину
     'width': 1.2,  # 1.2 метра в ширину
     'yaw': 0.0,  # направлена вперёд (0 радиан)
+    'center_x_px': 640.0,  # центр в пикселях по X
+    'center_y_px': 400.0,  # центр в пикселях по Y
+    'width_px': 120.0,  # ширина в пикселях
+    'length_px': 200.0,  # длина в пикселях
     'confidence': 200,  # уверенность 200/255
     'flags': 0
 }
@@ -214,6 +224,10 @@ arrow = {
 # - Позиция: (0.2, 10.0, 0)
 # - Размер: 3.5 x 1.2 метров
 # - Поворот: 0° (вперёд)
+
+# Для overlay на изображение:
+# - Центр: (640, 400) пикселей
+# - Размер: 120 x 200 пикселей
 ```
 
 ---
@@ -322,20 +336,24 @@ def parse_road_objects(payload: bytes):
 
     offset = 1
     for i in range(count):
-        obj_data = struct.unpack("<BffffBBH", payload[offset:offset+25])
+        obj_data = struct.unpack("<BfffffffffBBH", payload[offset:offset+41])
         obj = {
             'class_id': obj_data[0],
-            'center_x': obj_data[1],  # meters
-            'center_y': obj_data[2],  # meters
-            'length': obj_data[3],    # meters
-            'width': obj_data[4],     # meters
-            'yaw': obj_data[5],       # radians
-            'confidence': obj_data[6],
-            'flags': obj_data[7],
-            'reserved': obj_data[8]
+            'center_x': obj_data[1],      # meters
+            'center_y': obj_data[2],      # meters
+            'length': obj_data[3],        # meters
+            'width': obj_data[4],         # meters
+            'yaw': obj_data[5],           # radians
+            'center_x_px': obj_data[6],   # pixels
+            'center_y_px': obj_data[7],   # pixels
+            'width_px': obj_data[8],      # pixels
+            'length_px': obj_data[9],     # pixels
+            'confidence': obj_data[10],
+            'flags': obj_data[11],
+            'reserved': obj_data[12]
         }
         objects.append(obj)
-        offset += 25
+        offset += 41
 
     return {'type': 'road_objects', 'objects': objects}
 
@@ -441,3 +459,4 @@ A: Зависит от качества калибровки камеры. Пр�
 - **v1.0** - Базовые сообщения (0x01-0x04)
 - **v1.1** - Добавлено сообщение FITTED_LINES (0x05)
 - **v2.0** - Упрощение до 2 типов сообщений, координаты в метрах
+- **v2.1** - Добавлены пиксельные координаты в ROAD_OBJECTS (center_x_px, center_y_px, width_px, length_px)

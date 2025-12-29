@@ -542,10 +542,22 @@ class GeometryMapper:
         arrow_cfg = config.get("arrow_clustering", {})
         self.arrow_classes = set(arrow_cfg.get("arrow_classes", [11, 12, 13, 14, 15]))
 
+        # Line classes that should NOT be sent as road_objects (they go as fitted_lines)
+        self.line_classes = self.solid_classes | self.double_classes | self.dashed_classes
+
     def to_marking_objects(self, detections: Iterable[DetectionRaw], frame_shape: Tuple[int, int, int]) -> List[MarkingObject]:
+        """
+        Convert detections to MarkingObjects for road_objects protocol message.
+
+        Note: Line classes (4-10) are excluded - they are sent via fitted_lines message.
+        """
         h, w, _ = frame_shape
         result: List[MarkingObject] = []
         for det in detections:
+            # Skip line classes - they go as fitted_lines, not road_objects
+            if det.class_id in self.line_classes:
+                continue
+
             geometry = self._extract_object_geometry(det)
             if geometry is None:
                 continue
