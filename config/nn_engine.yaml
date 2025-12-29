@@ -4,7 +4,7 @@
 # Model settings
 model:
   path: NN/model_traced.pt
-  device: cpu  # cpu, cuda, cuda:0, cuda:1, etc.
+  device: cuda:0  # cpu, cuda, cuda:0, cuda:1, etc.
 
 # Input preprocessing
 input:

@@ -20,7 +20,7 @@ rtsp:
 # Neural Network settings (see also: config/nn_engine.yaml)
 nn:
   model_path: NN/model_traced.pt
-  device: cpu
+  device: cuda
   input_size:
   - 384
   - 384

@@ -50,6 +50,7 @@ class NNEngine:
         self.background_class_id = output_cfg.get("background_class_id", 0)
         self.min_area = output_cfg.get("min_area", 0)
         self.use_fp16 = cuda_cfg.get("use_fp16", True)
+        self._is_fp16 = False  # Will be set to True if model is successfully converted to FP16
 
         self._load_model()
 
@@ -86,11 +87,12 @@ class NNEngine:
             if self.device.startswith("cuda") and self.use_fp16:
                 try:
                     self.model.half()
+                    self._is_fp16 = True
                     logger.info("Using FP16 on CUDA for faster inference")
                 except Exception as exc:
                     logger.warning("Failed to switch model to FP16: %s", exc)
             self.model.eval()
-            logger.info("NNEngine initialized (device=%s)", self.device)
+            logger.info("NNEngine initialized (device=%s, fp16=%s)", self.device, self._is_fp16)
 
     def infer(self, frame: np.ndarray) -> List[DetectionRaw]:
         """
@@ -153,6 +155,8 @@ class NNEngine:
         img = (img - self.mean) / self.std
         img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
         tensor = torch.from_numpy(img).unsqueeze(0).to(self.device)
+        if self._is_fp16:
+            tensor = tensor.half()
         return tensor
 
     @staticmethod

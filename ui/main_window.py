@@ -15,8 +15,8 @@ from network.protocol import (
     ProtocolBuilder,
     SeqCounter,
     TimeProvider,
-    MSG_TYPE_LANE_DETAILS,
-    MSG_TYPE_MARKING_OBJECTS_EX,
+    MSG_TYPE_LANE_LINES,
+    MSG_TYPE_ROAD_OBJECTS,
 )
 from network.tcp_client import TcpClient
 from ui.video_widget import VideoWidget
