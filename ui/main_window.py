@@ -36,8 +36,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_button = QtWidgets.QPushButton("Start RTSP")
         self.stop_button = QtWidgets.QPushButton("Stop")
         self.stop_button.setEnabled(False)
+        self.start_button.setProperty("primary", True)
+        self.start_button.setMinimumHeight(34)
+        self.stop_button.setMinimumHeight(34)
 
         self.rtsp_edit = QtWidgets.QLineEdit(self.config_manager.get_value("rtsp.uri", ""))
+        self.rtsp_edit.setPlaceholderText("rtsp://user:pass@host/stream")
+        self.rtsp_edit.setClearButtonEnabled(True)
         self.conf_spin = QtWidgets.QDoubleSpinBox()
         self.conf_spin.setRange(0.0, 1.0)
         self.conf_spin.setSingleStep(0.01)
@@ -50,14 +55,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.area_spin.setValue(float(self.config_manager.get_value("postprocess.min_area", 100.0)))
 
         self.tcp_host_edit = QtWidgets.QLineEdit(self.config_manager.get_value("tcp.host", "127.0.0.1"))
+        self.tcp_host_edit.setClearButtonEnabled(True)
         self.tcp_port_spin = QtWidgets.QSpinBox()
         self.tcp_port_spin.setRange(1, 65535)
         self.tcp_port_spin.setValue(int(self.config_manager.get_value("tcp.port", 9000)))
 
-        self.rtsp_status = QtWidgets.QLabel("RTSP: stopped")
-        self.nn_status = QtWidgets.QLabel("NN: idle")
-        self.tcp_status = QtWidgets.QLabel("TCP: idle")
-        self.detections_label = QtWidgets.QLabel("Detections: 0")
+        self.rtsp_status = QtWidgets.QLabel("stopped")
+        self.nn_status = QtWidgets.QLabel("idle")
+        self.tcp_status = QtWidgets.QLabel("idle")
+        self.detections_label = QtWidgets.QLabel("0")
         self.video_enabled_checkbox = QtWidgets.QCheckBox("Render video")
         self.video_enabled_checkbox.setChecked(bool(self.config_manager.get_value("render.enabled", True)))
         self.show_masks_checkbox = QtWidgets.QCheckBox("Show NN masks")
@@ -73,39 +79,90 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connect_signals()
         if not GST_AVAILABLE:
             self.start_button.setEnabled(False)
-            self.rtsp_status.setText("RTSP: GStreamer bindings not available")
+            self.rtsp_status.setText("GStreamer bindings not available")
 
     def _build_layout(self) -> None:
-        control_layout = QtWidgets.QFormLayout()
-        control_layout.addRow("RTSP URI:", self.rtsp_edit)
-        control_layout.addRow("Confidence:", self.conf_spin)
-        control_layout.addRow("Min area:", self.area_spin)
-        control_layout.addRow("TCP host:", self.tcp_host_edit)
-        control_layout.addRow("TCP port:", self.tcp_port_spin)
-        control_layout.addRow(self.video_enabled_checkbox)
-        control_layout.addRow(self.show_masks_checkbox)
+        def _caption(text: str) -> QtWidgets.QLabel:
+            label = QtWidgets.QLabel(text)
+            label.setProperty("muted", True)
+            return label
+
+        form_align = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+
+        stream_group = QtWidgets.QGroupBox("STREAM")
+        stream_layout = QtWidgets.QVBoxLayout()
+        stream_layout.setContentsMargins(0, 0, 0, 0)
+        stream_layout.setSpacing(10)
+
+        stream_form = QtWidgets.QFormLayout()
+        stream_form.setLabelAlignment(form_align)
+        stream_form.setHorizontalSpacing(10)
+        stream_form.setVerticalSpacing(8)
+        stream_form.setContentsMargins(0, 0, 0, 0)
+        stream_form.addRow("RTSP URI", self.rtsp_edit)
+        stream_layout.addLayout(stream_form)
 
         buttons_layout = QtWidgets.QHBoxLayout()
+        buttons_layout.setSpacing(8)
         buttons_layout.addWidget(self.start_button)
         buttons_layout.addWidget(self.stop_button)
-        buttons_layout.addStretch()
+        stream_layout.addLayout(buttons_layout)
 
-        status_layout = QtWidgets.QHBoxLayout()
-        status_layout.addWidget(self.rtsp_status)
-        status_layout.addWidget(self.nn_status)
-        status_layout.addWidget(self.tcp_status)
-        status_layout.addWidget(self.detections_label)
-        status_layout.addStretch()
+        toggles_layout = QtWidgets.QVBoxLayout()
+        toggles_layout.setSpacing(6)
+        toggles_layout.addWidget(self.video_enabled_checkbox)
+        toggles_layout.addWidget(self.show_masks_checkbox)
+        stream_layout.addLayout(toggles_layout)
 
-        right_layout = QtWidgets.QVBoxLayout()
-        right_layout.addLayout(control_layout)
-        right_layout.addLayout(buttons_layout)
-        right_layout.addLayout(status_layout)
+        stream_group.setLayout(stream_layout)
+
+        inference_group = QtWidgets.QGroupBox("INFERENCE")
+        inference_form = QtWidgets.QFormLayout()
+        inference_form.setLabelAlignment(form_align)
+        inference_form.setHorizontalSpacing(10)
+        inference_form.setVerticalSpacing(8)
+        inference_form.setContentsMargins(0, 0, 0, 0)
+        inference_form.addRow("Confidence", self.conf_spin)
+        inference_form.addRow("Min area", self.area_spin)
+        inference_group.setLayout(inference_form)
+
+        network_group = QtWidgets.QGroupBox("NETWORK")
+        network_form = QtWidgets.QFormLayout()
+        network_form.setLabelAlignment(form_align)
+        network_form.setHorizontalSpacing(10)
+        network_form.setVerticalSpacing(8)
+        network_form.setContentsMargins(0, 0, 0, 0)
+        network_form.addRow("TCP host", self.tcp_host_edit)
+        network_form.addRow("TCP port", self.tcp_port_spin)
+        network_group.setLayout(network_form)
+
+        status_group = QtWidgets.QGroupBox("STATUS")
+        status_form = QtWidgets.QFormLayout()
+        status_form.setLabelAlignment(form_align)
+        status_form.setHorizontalSpacing(10)
+        status_form.setVerticalSpacing(6)
+        status_form.setContentsMargins(0, 0, 0, 0)
+        status_form.addRow(_caption("RTSP"), self.rtsp_status)
+        status_form.addRow(_caption("NN"), self.nn_status)
+        status_form.addRow(_caption("TCP"), self.tcp_status)
+        status_form.addRow(_caption("Detections"), self.detections_label)
+        status_group.setLayout(status_form)
+
+        right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+        right_layout.addWidget(stream_group)
+        right_layout.addWidget(inference_group)
+        right_layout.addWidget(network_group)
+        right_layout.addWidget(status_group)
         right_layout.addStretch()
 
         main_layout = QtWidgets.QHBoxLayout()
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(16)
         main_layout.addWidget(self.video_widget, stretch=3)
-        main_layout.addLayout(right_layout, stretch=1)
+        main_layout.addWidget(right_panel, stretch=1)
 
         central = QtWidgets.QWidget()
         central.setLayout(main_layout)
@@ -127,7 +184,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._start_services()
         except Exception as exc:
             logger.exception("Failed to start: %s", exc)
-            self.nn_status.setText(f"NN error: {exc}")
+            self.nn_status.setText(f"error: {exc}")
             self._teardown_inference()
             if self._video_service:
                 self._video_service.stop()
@@ -155,7 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._video_service.state_changed.connect(self._on_rtsp_state)
         self._video_service.error.connect(self._on_rtsp_error)
         self._video_service.start()
-        self.rtsp_status.setText("RTSP: connecting")
+        self.rtsp_status.setText("connecting")
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -193,7 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._inference_worker.detection_data.connect(self._on_detection_data)
         self._inference_worker.error.connect(self._on_inference_error)
         self._inference_worker.start()
-        self.nn_status.setText("NN: running")
+        self.nn_status.setText("running")
 
         self._protocol_builder = ProtocolBuilder(seq_counter=SeqCounter(), time_provider=TimeProvider())
 
@@ -212,7 +269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tcp_client.status_changed.connect(self._on_tcp_status)
         self._tcp_client.error.connect(self._on_tcp_error)
         self._tcp_client.start()
-        self.tcp_status.setText(f"TCP: connecting {host}:{port}")
+        self.tcp_status.setText(f"connecting {host}:{port}")
 
     def _on_stop_clicked(self) -> None:
         if self._video_service:
@@ -221,7 +278,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._teardown_tcp()
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        self.rtsp_status.setText("RTSP: stopped")
+        self.rtsp_status.setText("stopped")
 
     def _on_conf_changed(self, value: float) -> None:
         self.config_manager.set_value("postprocess.confidence_threshold", float(value))
@@ -286,7 +343,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.video_widget.set_image(image)
 
     def _on_detection_data(self, summary: object, objects: list, fitted_lines: list) -> None:
-        self.detections_label.setText(f"Detections: {len(objects)}")
+        self.detections_label.setText(str(len(objects)))
         if not self._protocol_builder or not self._tcp_client:
             return
         try:
@@ -307,13 +364,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_inference_error(self, msg: str) -> None:
         logger.error("Inference error: %s", msg)
-        self.nn_status.setText(f"NN error: {msg}")
+        self.nn_status.setText(f"error: {msg}")
 
     def _on_rtsp_state(self, state: str) -> None:
-        self.rtsp_status.setText(f"RTSP: {state}")
+        self.rtsp_status.setText(state)
 
     def _on_rtsp_error(self, msg: str) -> None:
-        self.rtsp_status.setText(f"RTSP error: {msg}")
+        self.rtsp_status.setText(f"error: {msg}")
         logger.error("RTSP error: %s", msg)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -322,21 +379,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._inference_worker:
             self._inference_worker.stop()
             self._inference_worker = None
-        self.nn_status.setText("NN: idle")
-        self.detections_label.setText("Detections: 0")
+        self.nn_status.setText("idle")
+        self.detections_label.setText("0")
 
     def _teardown_tcp(self) -> None:
         if self._tcp_client:
             self._tcp_client.stop()
             self._tcp_client = None
-        self.tcp_status.setText("TCP: idle")
+        self.tcp_status.setText("idle")
 
     def _on_tcp_status(self, status: str) -> None:
-        self.tcp_status.setText(f"TCP: {status}")
+        self.tcp_status.setText(status)
 
     def _on_tcp_error(self, msg: str) -> None:
         logger.error("TCP error: %s", msg)
-        self.tcp_status.setText(f"TCP error: {msg}")
+        self.tcp_status.setText(f"error: {msg}")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         if self._video_service:

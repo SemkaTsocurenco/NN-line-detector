@@ -29,10 +29,24 @@ def main() -> int:
     configure_qt_environment()
 
     from PyQt5 import QtWidgets
+
+    def apply_stylesheet(app: QtWidgets.QApplication) -> None:
+        from PyQt5 import QtCore
+
+        import resources_rc  # noqa: F401
+
+        style_file = QtCore.QFile(":/styles/dark.qss")
+        if not style_file.open(QtCore.QFile.ReadOnly | QtCore.QFile.Text):
+            logging.warning("Could not load stylesheet from resources")
+            return
+        stream = QtCore.QTextStream(style_file)
+        app.setStyleSheet(stream.readAll())
+
     from ui.main_window import MainWindow
 
     logging.info("Starting NN Line Detector application")
     app = QtWidgets.QApplication(sys.argv)
+    apply_stylesheet(app)
     window = MainWindow(config)
     window.show()
     return app.exec_()
