@@ -10,10 +10,10 @@ poly_degree: 2  # Degree of polynomial (1=line, 2=parabola)
 
 # RANSAC parameters
 ransac:
-  max_iterations: 100  # Maximum RANSAC iterations
-  inlier_threshold: 5.0  # Distance threshold for inliers (pixels)
-  min_inlier_ratio: 0.3  # Minimum ratio of inliers to accept fit (0.0-1.0)
-  min_points: 20  # Minimum number of points required for fitting
+  max_iterations: 400  # Maximum RANSAC iterations
+  inlier_threshold: 10.0  # Distance threshold for inliers (pixels)
+  min_inlier_ratio: 0.05  # Minimum ratio of inliers to accept fit (0.0-1.0)
+  min_points: 3  # Minimum number of points required for fitting
 
 # Mask processing
 mask:

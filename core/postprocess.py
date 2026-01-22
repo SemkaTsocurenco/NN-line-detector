@@ -82,6 +82,18 @@ class DetectionPostprocessor:
         self.confidence_to_byte_scale = geom_cfg.get("confidence_to_byte_scale", 255)
         self.bbox_area_offset = geom_cfg.get("bbox_area_offset", 1)
 
+        # Nearby mask merging parameters
+        nearby_cfg = config.get("nearby_mask_merging", {})
+        self.nearby_merging_enabled = nearby_cfg.get("enabled", True)
+        self.nearby_target_classes = set(nearby_cfg.get("target_classes", [4, 5, 6, 7, 8, 9, 10]))
+        self.nearby_max_distance = float(nearby_cfg.get("max_distance", 50))
+        self.nearby_min_bbox_iou = float(nearby_cfg.get("min_bbox_iou", 0.05))
+        self.nearby_max_mask_overlap = float(nearby_cfg.get("max_mask_overlap", 0.8))
+        self.nearby_use_directional = bool(nearby_cfg.get("use_directional_filter", True))
+        self.nearby_max_angle_diff = float(nearby_cfg.get("max_angle_diff", 30))
+        self.nearby_min_area_ratio = float(nearby_cfg.get("min_area_ratio", 0.1))
+        self.nearby_max_area_ratio = float(nearby_cfg.get("max_area_ratio", 5.0))
+
         # Arrow clustering parameters
         arrow_cfg = config.get("arrow_clustering", {})
         self.arrow_clustering_enabled = arrow_cfg.get("enabled", True)
@@ -113,6 +125,11 @@ class DetectionPostprocessor:
             filtered.append(det)
 
         merged = self._merge_by_class(filtered)
+
+        # Merge nearby masks that are likely fragments of same object
+        if self.nearby_merging_enabled:
+            merged = self._merge_nearby_masks(merged)
+
         if self.arrow_clustering_enabled:
             merged = self._cluster_arrows(merged)
         return merged
@@ -251,6 +268,219 @@ class DetectionPostprocessor:
             if not placed:
                 merged.append(det)
         return merged
+
+    def _merge_nearby_masks(self, detections: List[DetectionRaw]) -> List[DetectionRaw]:
+        """
+        Merge nearby masks of the same class that are likely fragments of the same object.
+
+        This is especially useful for line detections that get fragmented into multiple small masks.
+        Uses distance, direction, and size criteria to determine if masks should be merged.
+        """
+        if not self.nearby_merging_enabled:
+            return detections
+
+        # Group by class for efficiency
+        by_class: Dict[int, List[DetectionRaw]] = {}
+        for det in detections:
+            if det.class_id in self.nearby_target_classes:
+                if det.class_id not in by_class:
+                    by_class[det.class_id] = []
+                by_class[det.class_id].append(det)
+
+        # Merge within each class
+        result: List[DetectionRaw] = []
+        for class_id, class_dets in by_class.items():
+            merged_class = self._merge_nearby_masks_single_class(class_dets)
+            result.extend(merged_class)
+
+        # Add detections that don't need nearby merging
+        for det in detections:
+            if det.class_id not in self.nearby_target_classes:
+                result.append(det)
+
+        return result
+
+    def _merge_nearby_masks_single_class(self, detections: List[DetectionRaw]) -> List[DetectionRaw]:
+        """Merge nearby masks within a single class."""
+        if len(detections) <= 1:
+            return detections
+
+        # Sort by area (largest first) to avoid merging into tiny fragments
+        detections = sorted(detections, key=lambda d: self._area(d) or 0, reverse=True)
+
+        merged: List[DetectionRaw] = []
+        consumed = set()
+
+        for i, det_a in enumerate(detections):
+            if i in consumed or det_a.mask is None or det_a.bbox is None:
+                continue
+
+            # Start with this detection
+            combined_mask = det_a.mask.copy()
+            combined_bbox = det_a.bbox
+            max_conf = det_a.confidence
+            consumed.add(i)
+
+            # Try to merge nearby masks
+            for j, det_b in enumerate(detections):
+                if j <= i or j in consumed or det_b.mask is None or det_b.bbox is None:
+                    continue
+
+                if self._should_merge_nearby(combined_mask, combined_bbox, det_a, det_b):
+                    # Merge masks
+                    combined_mask = np.maximum(combined_mask, det_b.mask)
+                    combined_bbox = self._bbox_from_mask(combined_mask)
+                    max_conf = max(max_conf, det_b.confidence)
+                    consumed.add(j)
+                    logger.debug(
+                        f"Merged nearby masks: class={det_a.class_id}, "
+                        f"bbox1={det_a.bbox}, bbox2={det_b.bbox}"
+                    )
+
+            # Add merged detection
+            merged.append(
+                DetectionRaw(
+                    class_id=det_a.class_id,
+                    confidence=max_conf,
+                    mask=combined_mask,
+                    bbox=combined_bbox,
+                    polygon=det_a.polygon,
+                )
+            )
+
+        return merged
+
+    def _should_merge_nearby(
+        self,
+        combined_mask: np.ndarray,
+        combined_bbox: Tuple[int, int, int, int],
+        det_a: DetectionRaw,
+        det_b: DetectionRaw,
+    ) -> bool:
+        """
+        Determine if two nearby masks should be merged.
+
+        Checks:
+        1. Distance between centers
+        2. Bbox IoU (low threshold)
+        3. Mask overlap (shouldn't be too high = different objects)
+        4. Direction alignment (for elongated objects like lines)
+        5. Size ratio (prevent merging very different sizes)
+        """
+        bbox_a = combined_bbox
+        bbox_b = det_b.bbox
+
+        if bbox_b is None:
+            return False
+
+        # Check 1: Distance between centers
+        center_a = self._bbox_center_tuple(bbox_a)
+        center_b = self._bbox_center_tuple(bbox_b)
+        distance = self._euclidean_distance(center_a, center_b)
+
+        if distance > self.nearby_max_distance:
+            return False
+
+        # Check 2: Minimum IoU (very low threshold - just to ensure some proximity)
+        bbox_iou = self._iou(bbox_a, bbox_b)
+        if bbox_iou < self.nearby_min_bbox_iou:
+            return False
+
+        # Check 3: Mask overlap shouldn't be too high (different objects)
+        mask_overlap = self._mask_overlap_ratio(combined_mask, bbox_a, det_b.mask, bbox_b)
+        if mask_overlap > self.nearby_max_mask_overlap:
+            return False
+
+        # Check 4: Area ratio (prevent merging very different sizes)
+        area_a = (combined_mask > 0).sum()
+        area_b = (det_b.mask > 0).sum()
+        if area_a == 0 or area_b == 0:
+            return False
+
+        smaller_area = min(area_a, area_b)
+        larger_area = max(area_a, area_b)
+        area_ratio = smaller_area / larger_area
+
+        if area_ratio < self.nearby_min_area_ratio:
+            return False
+        if larger_area / smaller_area > self.nearby_max_area_ratio:
+            return False
+
+        # Check 5: Direction alignment (for elongated objects like lines)
+        if self.nearby_use_directional:
+            angle_diff = self._mask_angle_difference(combined_mask, det_b.mask)
+            if angle_diff is not None and angle_diff > self.nearby_max_angle_diff:
+                return False
+
+        return True
+
+    @staticmethod
+    def _bbox_center_tuple(bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
+        """Get center of bbox as (x, y) tuple."""
+        x1, y1, x2, y2 = bbox
+        return (0.5 * (x1 + x2), 0.5 * (y1 + y2))
+
+    @staticmethod
+    def _euclidean_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+        """Calculate Euclidean distance between two points."""
+        return float(np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2))
+
+    def _mask_angle_difference(self, mask_a: np.ndarray, mask_b: np.ndarray) -> Optional[float]:
+        """
+        Calculate angle difference between principal directions of two masks.
+
+        Returns angle difference in degrees, or None if direction can't be computed.
+        """
+        dir_a = self._mask_principal_direction(mask_a)
+        dir_b = self._mask_principal_direction(mask_b)
+
+        if dir_a is None or dir_b is None:
+            return None
+
+        # Compute angle between directions using dot product
+        dot = abs(dir_a[0] * dir_b[0] + dir_a[1] * dir_b[1])
+        dot = min(1.0, max(-1.0, dot))  # Clamp to [-1, 1] for numerical stability
+
+        # Angle in degrees
+        angle_rad = np.arccos(dot)
+        angle_deg = float(np.degrees(angle_rad))
+
+        return angle_deg
+
+    @staticmethod
+    def _mask_principal_direction(mask: np.ndarray) -> Optional[Tuple[float, float]]:
+        """
+        Compute principal direction of a mask using PCA.
+
+        Returns normalized direction vector (dx, dy) or None.
+        """
+        ys, xs = np.nonzero(mask)
+        if len(xs) < 2:
+            return None
+
+        # Center coordinates
+        cx = float(xs.mean())
+        cy = float(ys.mean())
+        coords = np.column_stack([xs - cx, ys - cy])
+
+        # Compute covariance and eigenvectors
+        try:
+            cov = np.cov(coords, rowvar=False)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+        except np.linalg.LinAlgError:
+            return None
+
+        # Principal direction is eigenvector with largest eigenvalue
+        idx = int(np.argmax(eigvals))
+        direction = eigvecs[:, idx]
+
+        # Normalize
+        norm = float(np.linalg.norm(direction))
+        if norm == 0:
+            return None
+
+        direction = direction / norm
+        return (float(direction[0]), float(direction[1]))
 
     def _cluster_arrows(self, detections: List[DetectionRaw]) -> List[DetectionRaw]:
         """

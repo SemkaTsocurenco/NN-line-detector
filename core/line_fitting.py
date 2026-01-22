@@ -92,7 +92,11 @@ class PolynomialRANSAC:
             inlier_mask: boolean mask of inlier points
         """
         if len(points) < self.min_points:
-            logger.debug(f"Not enough points for fitting: {len(points)} < {self.min_points}")
+            logger.warning(
+                f"[RANSAC] REJECTED: Not enough points ({len(points)} < {self.min_points}). "
+                f"X range: [{points[:, 0].min():.0f}, {points[:, 0].max():.0f}], "
+                f"Y range: [{points[:, 1].min():.0f}, {points[:, 1].max():.0f}]"
+            )
             return None
 
         # Rotate points 90° clockwise: swap x and y
@@ -117,7 +121,9 @@ class PolynomialRANSAC:
             try:
                 y_sample = sample_points[:, 0]  # y coordinates
                 x_sample = sample_points[:, 1]  # x coordinates
-                coeffs = np.polyfit(y_sample, x_sample, self.degree)
+                coeffs = self._safe_polyfit(y_sample, x_sample, self.degree)
+                if coeffs is None:
+                    continue
             except (np.linalg.LinAlgError, ValueError) as e:
                 logger.debug(f"Polyfit failed at iteration {iteration}: {e}")
                 continue
@@ -140,24 +146,92 @@ class PolynomialRANSAC:
 
         # Check if we have enough inliers
         if best_inliers is None:
-            logger.debug("RANSAC failed to find any valid model")
+            logger.warning(
+                f"[RANSAC] REJECTED: No valid model found after {self.max_iterations} iterations. "
+                f"Points: {len(points)}, threshold: {self.inlier_threshold}px"
+            )
             return None
 
         inlier_ratio = best_inlier_count / len(rotated_points)
         if inlier_ratio < self.min_inlier_ratio:
-            logger.debug(f"Inlier ratio too low: {inlier_ratio:.2f} < {self.min_inlier_ratio}")
+            logger.warning(
+                f"[RANSAC] REJECTED: Inlier ratio too low ({inlier_ratio:.3f} < {self.min_inlier_ratio}). "
+                f"Points: {len(points)}, inliers: {best_inlier_count}, threshold: {self.inlier_threshold}px. "
+                f"TIP: Try increasing inlier_threshold or decreasing min_inlier_ratio"
+            )
             return None
 
         # Refit on all inliers for better accuracy
         inlier_points = rotated_points[best_inliers]
         try:
-            final_coeffs = np.polyfit(inlier_points[:, 0], inlier_points[:, 1], self.degree)
+            final_coeffs = self._safe_polyfit(inlier_points[:, 0], inlier_points[:, 1], self.degree)
+            if final_coeffs is None:
+                final_coeffs = best_coeffs
         except (np.linalg.LinAlgError, ValueError):
             final_coeffs = best_coeffs
 
         # Note: coefficients are now for x = f(y), not y = f(x)
         # The caller needs to handle this when evaluating the curve
         return final_coeffs, best_inliers
+
+    def _safe_polyfit(self, x: np.ndarray, y: np.ndarray, degree: int) -> Optional[np.ndarray]:
+        """
+        Safely fit polynomial with fallback to lower degree.
+
+        If degree 2 polynomial is poorly conditioned (nearly straight line),
+        falls back to degree 1 (straight line) and pads coefficients.
+
+        Args:
+            x: x coordinates
+            y: y coordinates
+            degree: polynomial degree
+
+        Returns:
+            Polynomial coefficients or None if fitting fails
+        """
+        import warnings
+
+        # Try fitting with requested degree
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                coeffs = np.polyfit(x, y, degree, rcond=None)
+
+                # Check if fit is reasonable (not NaN or Inf)
+                if np.any(np.isnan(coeffs)) or np.any(np.isinf(coeffs)):
+                    raise ValueError("Coefficients contain NaN or Inf")
+
+                # For degree 2, check if quadratic term is tiny (nearly straight line)
+                if degree == 2 and len(coeffs) >= 3:
+                    # If quadratic coefficient is very small, the line is nearly straight
+                    # This often causes conditioning issues
+                    if abs(coeffs[0]) < 1e-6:
+                        # Fallback to linear fit
+                        logger.debug("Quadratic term too small, falling back to linear fit")
+                        linear_coeffs = np.polyfit(x, y, 1, rcond=None)
+                        # Pad to degree 2 format: [0, b, c] for x = 0*y^2 + b*y + c
+                        coeffs = np.array([0.0, linear_coeffs[0], linear_coeffs[1]])
+
+                return coeffs
+
+        except (np.linalg.LinAlgError, ValueError):
+            # If fitting with requested degree fails, try lower degree
+            if degree > 1:
+                logger.debug(f"Degree {degree} fit failed, trying degree {degree-1}")
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        lower_coeffs = np.polyfit(x, y, degree - 1, rcond=None)
+
+                        # Pad coefficients to match requested degree
+                        # For degree 2: [0, b, c] represents x = 0*y^2 + b*y + c
+                        padded_coeffs = np.zeros(degree + 1)
+                        padded_coeffs[-len(lower_coeffs):] = lower_coeffs
+                        return padded_coeffs
+                except:
+                    return None
+            return None
+
 
 
 class LineValidator:
@@ -306,7 +380,8 @@ class LineFitter:
         # Get config values with fallback to defaults
         poly_degree = config.get("poly_degree", poly_degree)
         mask_cfg = config.get("mask", {})
-        split_margin = mask_cfg.get("split_margin", split_margin)
+        # Check both flat and nested structure for split_margin
+        split_margin = config.get("split_margin", mask_cfg.get("split_margin", split_margin))
         val_cfg = config.get("validation", {})
         validate_lines = val_cfg.get("enabled", validate_lines)
 
@@ -326,8 +401,11 @@ class LineFitter:
             config=config,
         ) if validate_lines else None
 
-        # Get binarization threshold from config
-        self.binarization_threshold = mask_cfg.get("binarization_threshold", 127)
+        # Get binarization threshold from config (check both flat and nested structure)
+        self.binarization_threshold = config.get(
+            "binarization_threshold",
+            mask_cfg.get("binarization_threshold", 127)
+        )
 
         # Get line class IDs from config
         self._line_class_ids = config.get("line_class_ids", [4, 5, 6, 7, 8, 9, 10])
@@ -390,14 +468,25 @@ class LineFitter:
         points = self._extract_points_from_mask(mask)
 
         if points is None or len(points) < self.ransac.min_points:
-            logger.debug(f"Not enough points in mask for class {class_id}")
+            mask_pixels = np.sum(mask > 0) if mask is not None else 0
+            extracted = len(points) if points is not None else 0
+            logger.warning(
+                f"[LineFitter] REJECTED class {class_id} ({side}): Not enough points. "
+                f"Mask pixels: {mask_pixels}, extracted: {extracted}, required: {self.ransac.min_points}. "
+                f"Binarization threshold: {self.binarization_threshold}"
+            )
             return None
 
         # Fit polynomial using RANSAC
+        logger.info(
+            f"[LineFitter] Fitting class {class_id} ({side}): {len(points)} points, "
+            f"X:[{points[:, 0].min():.0f}-{points[:, 0].max():.0f}], "
+            f"Y:[{points[:, 1].min():.0f}-{points[:, 1].max():.0f}]"
+        )
         result = self.ransac.fit(points)
 
         if result is None:
-            logger.debug(f"RANSAC fitting failed for class {class_id}")
+            logger.warning(f"[LineFitter] REJECTED class {class_id} ({side}): RANSAC fitting failed")
             return None
 
         coeffs, inlier_mask = result
@@ -430,6 +519,12 @@ class LineFitter:
         # Validate if enabled
         if self.validate_lines and self.validator is not None:
             fitted_line.is_valid = self.validator.validate(fitted_line)
+
+        logger.info(
+            f"[LineFitter] SUCCESS class {class_id} ({side}): "
+            f"inlier_ratio={inlier_ratio:.3f}, curvature={curvature:.6f}, "
+            f"start={fitted_line.start_point}, end={fitted_line.end_point}, valid={fitted_line.is_valid}"
+        )
 
         return fitted_line
 
@@ -481,6 +576,13 @@ class LineFitter:
         # Can be configured via config file
         LINE_CLASS_IDS = set(getattr(self, '_line_class_ids', [4, 5, 6, 7, 8, 9, 10]))
 
+        # Log incoming detections
+        line_detections = [d for d in detections if d.class_id in LINE_CLASS_IDS and d.mask is not None]
+        logger.info(
+            f"[LineFitter] Processing {len(line_detections)} line detections "
+            f"(split_by_center={split_by_center}, margin={self.split_margin})"
+        )
+
         for det in detections:
             # Only process line classes
             if det.class_id not in LINE_CLASS_IDS:
@@ -493,6 +595,15 @@ class LineFitter:
             # Split mask into left and right if requested
             if split_by_center:
                 left_mask, right_mask = self._split_mask_by_center(det.mask, margin=self.split_margin)
+
+                # Log split results
+                orig_pixels = np.sum(det.mask > 0) if det.mask is not None else 0
+                left_pixels = np.sum(left_mask > 0) if left_mask is not None else 0
+                right_pixels = np.sum(right_mask > 0) if right_mask is not None else 0
+                logger.debug(
+                    f"[LineFitter] Split class {det.class_id}: "
+                    f"original={orig_pixels}px -> left={left_pixels}px, right={right_pixels}px"
+                )
 
                 # Fit left line
                 if left_mask is not None:

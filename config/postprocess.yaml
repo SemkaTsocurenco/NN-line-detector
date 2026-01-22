@@ -3,8 +3,8 @@
 
 # Detection filtering
 filtering:
-  confidence_threshold: 0.71  # Minimum confidence to keep detection (0.0-1.0)
-  min_area: 150.0  # Minimum area in pixels
+  confidence_threshold: 0.5  # Minimum confidence to keep detection (0.0-1.0) - СНИЖЕНО для фрагментов
+  min_area: 10.0  # Minimum area in pixels - СИЛЬНО УМЕНЬШЕНО чтобы мелкие фрагменты доходили до объединения
   merge_iou_threshold: 0.5  # IoU threshold for merging overlapping detections (0.0-1.0)
 
 # Geometry mapping
@@ -32,8 +32,20 @@ line_colors:
 # Map class IDs to line styles
 line_styles:
   solid_classes: [4, 5, 6]  # Solid single lines
-  double_classes: [7, 8]  # Double lines
+  double_classes: [ 7, 8]  # Double lines (6 = red double solid)
   dashed_classes: [9, 10]  # Dashed lines
+
+# Nearby mask merging (merge fragmented masks of the same object)
+nearby_mask_merging:
+  enabled: true
+  target_classes: [4, 5, 6, 7, 8, 9, 10]  # Line classes that tend to fragment
+  max_distance: 150  # Maximum distance between mask centers to consider merging (pixels) - УВЕЛИЧЕНО
+  min_bbox_iou: 0.0  # Minimum bbox IoU (very low threshold for nearby fragments) - ОТКЛЮЧЕНО
+  max_mask_overlap: 0.9  # Maximum mask overlap ratio to avoid merging different objects - СМЯГЧЕНО
+  use_directional_filter: true  # Only merge masks aligned along similar direction
+  max_angle_diff: 45  # Maximum angle difference between masks (degrees) - СМЯГЧЕНО
+  min_area_ratio: 0.01  # Smaller mask must be at least this fraction of larger one (prevents tiny noise) - СМЯГЧЕНО
+  max_area_ratio: 100.0  # Smaller mask can't be more than this times smaller - СИЛЬНО СМЯГЧЕНО
 
 # Arrow clustering (merge fragmented arrow masks and overlapping line-like masks)
 arrow_clustering:

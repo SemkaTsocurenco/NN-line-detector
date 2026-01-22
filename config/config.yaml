@@ -38,18 +38,20 @@ nn:
     '23': bike_icon
     '24': parking_lot
 postprocess:
-  confidence_threshold: 0.71
-  min_area: 150.0
+  confidence_threshold: 0.0
+  min_area: 0.0
   merge_iou_threshold: 0.5
 line_fitting:
   enabled: true
   split_by_center: true
   poly_degree: 2
-  ransac_iterations: 100
-  inlier_threshold: 5.0
-  min_inlier_ratio: 0.3
-  min_points: 20
+  # RANSAC parameters - optimized for thick road markings (10-25px width)
+  ransac_iterations: 400      # More iterations for better convergence
+  inlier_threshold: 15.0      # Increased for thick lines (was 5.0) - should be ~half of line width
+  min_inlier_ratio: 0.03      # Very relaxed for noisy masks
+  min_points: 10              # Reduced for smaller fragments (was 20)
   split_margin: 20
+  binarization_threshold: 50  # Lowered for soft NN masks (default was 127)
 tcp:
   host: 127.0.0.1
   port: 9000
@@ -68,4 +70,4 @@ logging:
   log_file: ''
 render:
   enabled: true
-  show_masks: false
+  show_masks: true
