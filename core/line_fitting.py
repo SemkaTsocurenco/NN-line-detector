@@ -478,11 +478,7 @@ class LineFitter:
             return None
 
         # Fit polynomial using RANSAC
-        logger.info(
-            f"[LineFitter] Fitting class {class_id} ({side}): {len(points)} points, "
-            f"X:[{points[:, 0].min():.0f}-{points[:, 0].max():.0f}], "
-            f"Y:[{points[:, 1].min():.0f}-{points[:, 1].max():.0f}]"
-        )
+
         result = self.ransac.fit(points)
 
         if result is None:
@@ -520,11 +516,6 @@ class LineFitter:
         if self.validate_lines and self.validator is not None:
             fitted_line.is_valid = self.validator.validate(fitted_line)
 
-        logger.info(
-            f"[LineFitter] SUCCESS class {class_id} ({side}): "
-            f"inlier_ratio={inlier_ratio:.3f}, curvature={curvature:.6f}, "
-            f"start={fitted_line.start_point}, end={fitted_line.end_point}, valid={fitted_line.is_valid}"
-        )
 
         return fitted_line
 
@@ -578,10 +569,7 @@ class LineFitter:
 
         # Log incoming detections
         line_detections = [d for d in detections if d.class_id in LINE_CLASS_IDS and d.mask is not None]
-        logger.info(
-            f"[LineFitter] Processing {len(line_detections)} line detections "
-            f"(split_by_center={split_by_center}, margin={self.split_margin})"
-        )
+
 
         for det in detections:
             # Only process line classes
@@ -596,14 +584,6 @@ class LineFitter:
             if split_by_center:
                 left_mask, right_mask = self._split_mask_by_center(det.mask, margin=self.split_margin)
 
-                # Log split results
-                orig_pixels = np.sum(det.mask > 0) if det.mask is not None else 0
-                left_pixels = np.sum(left_mask > 0) if left_mask is not None else 0
-                right_pixels = np.sum(right_mask > 0) if right_mask is not None else 0
-                logger.debug(
-                    f"[LineFitter] Split class {det.class_id}: "
-                    f"original={orig_pixels}px -> left={left_pixels}px, right={right_pixels}px"
-                )
 
                 # Fit left line
                 if left_mask is not None:
@@ -615,12 +595,6 @@ class LineFitter:
                     )
                     if left_line is not None and left_line.is_valid:
                         fitted_lines.append(left_line)
-                        logger.debug(
-                            f"Fitted LEFT line for class {det.class_id}: "
-                            f"inlier_ratio={left_line.inlier_ratio:.2f}, "
-                            f"curvature={left_line.curvature:.4f}, "
-                            f"start={left_line.start_point}, end={left_line.end_point}"
-                        )
                     elif left_line is not None and not left_line.is_valid:
                         logger.debug(f"LEFT line for class {det.class_id} failed validation")
 
@@ -634,12 +608,6 @@ class LineFitter:
                     )
                     if right_line is not None and right_line.is_valid:
                         fitted_lines.append(right_line)
-                        logger.debug(
-                            f"Fitted RIGHT line for class {det.class_id}: "
-                            f"inlier_ratio={right_line.inlier_ratio:.2f}, "
-                            f"curvature={right_line.curvature:.4f}, "
-                            f"start={right_line.start_point}, end={right_line.end_point}"
-                        )
                     elif right_line is not None and not right_line.is_valid:
                         logger.debug(f"RIGHT line for class {det.class_id} failed validation")
             else:
@@ -653,12 +621,6 @@ class LineFitter:
 
                 if fitted_line is not None and fitted_line.is_valid:
                     fitted_lines.append(fitted_line)
-                    logger.debug(
-                        f"Fitted line for class {det.class_id}: "
-                        f"inlier_ratio={fitted_line.inlier_ratio:.2f}, "
-                        f"curvature={fitted_line.curvature:.4f}, "
-                        f"start={fitted_line.start_point}, end={fitted_line.end_point}"
-                    )
                 elif fitted_line is not None and not fitted_line.is_valid:
                     logger.debug(f"Line for class {det.class_id} failed validation")
 
