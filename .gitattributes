@@ -1,0 +1,2 @@
+NN/*.pth filter=lfs diff=lfs merge=lfs -text
+NN/*.pt filter=lfs diff=lfs merge=lfs -text
